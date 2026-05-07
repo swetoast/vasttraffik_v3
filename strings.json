@@ -1,0 +1,168 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Västtrafik",
+        "description": "Get your credentials from [developer.vasttrafik.se](https://developer.vasttrafik.se) → My Applications → create an app → copy the key and secret.",
+        "data": {
+          "key": "API Key",
+          "secret": "API Secret"
+        },
+        "data_description": {
+          "secret": "Stored securely and never shown again"
+        }
+      },
+      "start_stop": {
+        "title": "Where do you board?",
+        "description": "Enter the name of your boarding stop. If multiple matches are found you will be shown a list to pick from.\n\nExample: {example}",
+        "data": {
+          "stop_name": "Stop name"
+        },
+        "data_description": {
+          "stop_name": "You can use city name for precision, e.g. 'Brunnsparken, Göteborg'"
+        }
+      },
+      "end_stop": {
+        "title": "Where are you going? (optional)",
+        "description": "Adding a destination filters the line list to only lines that go there, and auto-selects the direction. Leave blank to see all lines from **{start}**.\n\nExample: {example}",
+        "data": {
+          "end_stop_name": "Destination stop"
+        },
+        "data_description": {
+          "end_stop_name": "Leave blank to skip"
+        }
+      },
+      "pick_stop": {
+        "title": "Multiple stops found",
+        "description": "Your search matched more than one stop. Select the correct one.",
+        "data": {
+          "picked_stop": "Stop"
+        }
+      },
+      "pick_line": {
+        "title": "Which line?",
+        "description": "Lines currently departing from **{stop}**. Select the line you want to track.",
+        "data": {
+          "line": "Line"
+        }
+      },
+      "line_manual": {
+        "title": "Enter the line name",
+        "description": "No live departures found at **{stop}** right now. Enter the line short name (e.g. `16`, `Röd`, `V1`).",
+        "data": {
+          "line_name": "Line short name"
+        }
+      },
+      "pick_direction": {
+        "title": "Which direction?",
+        "description": "Filter line **{line}** from **{stop}** to a specific end destination, or choose any direction.",
+        "data": {
+          "direction": "Direction"
+        }
+      },
+      "line_options": {
+        "title": "All set!",
+        "description": "**Line {line}** from **{stop}** → **{direction}**\n\nThree entities will be created automatically:\n- 🕐  **Departure time** — next bus with realtime delay and platform\n- ⚠️  **Störning** — live service disruption alerts\n- 📍  **Position** — vehicle location on the map (interpolated, updated every 30 s)",
+        "data": {
+          "delay": "Walk time to stop",
+          "name": "Name",
+          "add_another": "Add another line"
+        },
+        "data_description": {
+          "delay": "Show departures at least this many minutes in the future — set this to your walk time.",
+          "name": "Prefix used for all three entities. Leave blank to use the auto-generated name."
+        }
+      }
+    },
+    "error": {
+      "auth": "Authentication failed — check your API key and secret.",
+      "cannot_connect": "Could not reach the Västtrafik API. Check your connection.",
+      "station_required": "Please enter a stop name.",
+      "station_not_found": "No stop found. Try adding the city, e.g. 'Brunnsparken, Göteborg'.",
+      "line_required": "Please enter a line name.",
+      "unknown": "An unexpected error occurred — check the HA log for details."
+    },
+    "abort": {
+      "already_configured": "Västtrafik is already configured. Use the ⚙️ button to add more lines.",
+      "single_instance_allowed": "Only one Västtrafik integration is supported."
+    }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "title": "Manage monitored lines",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "start_stop": {
+        "title": "Where do you board?",
+        "description": "Example: {example}",
+        "data": {
+          "stop_name": "Start stop"
+        }
+      },
+      "end_stop": {
+        "title": "Where do you get off? (optional)",
+        "description": "Start: **{start}** — Example: {example}",
+        "data": {
+          "end_stop_name": "End stop (leave blank to skip)"
+        }
+      },
+      "pick_stop": {
+        "title": "Multiple stops found — pick one",
+        "data": {
+          "picked_stop": "Stop"
+        }
+      },
+      "pick_line": {
+        "title": "Which line?",
+        "description": "Lines departing from **{stop}**.",
+        "data": {
+          "line": "Line"
+        }
+      },
+      "line_manual": {
+        "title": "Enter line name",
+        "description": "No live departures at **{stop}**. Enter the line short name.",
+        "data": {
+          "line_name": "Line short name"
+        }
+      },
+      "pick_direction": {
+        "title": "Which direction?",
+        "description": "Line **{line}** from **{stop}**.",
+        "data": {
+          "direction": "Direction"
+        }
+      },
+      "line_options": {
+        "title": "Options",
+        "description": "**Line {line}** from **{stop}** → **{direction}**",
+        "data": {
+          "delay": "Walk time to stop",
+          "name": "Name prefix",
+          "add_another": "Add another line"
+        }
+      },
+      "remove": {
+        "title": "Remove monitored lines",
+        "description": "Tick the lines you want to **keep**. Unticked ones will be removed.",
+        "data": {
+          "keep": "Keep"
+        }
+      }
+    },
+    "error": {
+      "auth": "Authentication failed.",
+      "cannot_connect": "Could not reach the Västtrafik API.",
+      "station_required": "Please enter a stop name.",
+      "station_not_found": "No stop found. Try adding the city name.",
+      "line_required": "Please enter a line name.",
+      "unknown": "An unexpected error occurred — check the HA log for details."
+    },
+    "abort": {
+      "no_lines": "No lines are currently monitored."
+    }
+  }
+}

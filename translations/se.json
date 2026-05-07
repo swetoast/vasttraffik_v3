@@ -1,0 +1,168 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Anslut till Västtrafik",
+        "description": "Hämta dina uppgifter från [developer.vasttrafik.se](https://developer.vasttrafik.se) → My Applications → skapa en app → kopiera key och secret.",
+        "data": {
+          "key": "API-nyckel",
+          "secret": "API-hemlighet"
+        },
+        "data_description": {
+          "secret": "Sparas säkert och visas inte igen"
+        }
+      },
+      "start_stop": {
+        "title": "Var går du på?",
+        "description": "Ange namnet på hållplatsen där du går på. Om flera träffar hittas får du välja rätt hållplats i en lista.\n\nExempel: {example}",
+        "data": {
+          "stop_name": "Hållplats"
+        },
+        "data_description": {
+          "stop_name": "Ange gärna ort för bättre träff, t.ex. 'Brunnsparken, Göteborg'"
+        }
+      },
+      "end_stop": {
+        "title": "Vart ska du? (valfritt)",
+        "description": "En destination filtrerar linjelistan till linjer som går dit och väljer riktning automatiskt. Lämna tomt för att visa alla linjer från **{start}**.\n\nExempel: {example}",
+        "data": {
+          "end_stop_name": "Destination"
+        },
+        "data_description": {
+          "end_stop_name": "Lämna tomt för att hoppa över"
+        }
+      },
+      "pick_stop": {
+        "title": "Flera hållplatser hittades",
+        "description": "Sökningen matchade fler än en hållplats. Välj rätt hållplats.",
+        "data": {
+          "picked_stop": "Hållplats"
+        }
+      },
+      "pick_line": {
+        "title": "Vilken linje?",
+        "description": "Linjer som avgår från **{stop}** just nu. Välj linjen du vill bevaka.",
+        "data": {
+          "line": "Linje"
+        }
+      },
+      "line_manual": {
+        "title": "Ange linjenamn",
+        "description": "Inga liveavgångar hittades vid **{stop}** just nu. Ange linjens kortnamn, t.ex. `16`, `Röd` eller `V1`.",
+        "data": {
+          "line_name": "Linjekortnamn"
+        }
+      },
+      "pick_direction": {
+        "title": "Vilken riktning?",
+        "description": "Filtrera linje **{line}** från **{stop}** mot en specifik destination, eller välj valfri riktning.",
+        "data": {
+          "direction": "Riktning"
+        }
+      },
+      "line_options": {
+        "title": "Klart!",
+        "description": "**Linje {line}** från **{stop}** → **{direction}**\n\nTre entiteter skapas automatiskt:\n- 🕐 **Avgångstid** — nästa avgång med realtidsförsening och läge\n- ⚠️ **Störning** — aktuella trafikstörningar\n- 📍 **Position** — fordonsposition på kartan när data finns",
+        "data": {
+          "delay": "Gångtid till hållplats",
+          "name": "Namn",
+          "add_another": "Lägg till en linje till"
+        },
+        "data_description": {
+          "delay": "Visa avgångar minst så här många minuter framåt — sätt detta till din gångtid.",
+          "name": "Prefix för relaterade entiteter. Lämna tomt för automatiskt namn."
+        }
+      }
+    },
+    "error": {
+      "auth": "Autentisering misslyckades — kontrollera API-nyckel och API-hemlighet.",
+      "cannot_connect": "Kunde inte nå Västtrafiks API. Kontrollera anslutningen.",
+      "station_required": "Ange en hållplats.",
+      "station_not_found": "Ingen hållplats hittades. Prova att lägga till ort, t.ex. 'Brunnsparken, Göteborg'.",
+      "line_required": "Ange ett linjenamn.",
+      "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen."
+    },
+    "abort": {
+      "already_configured": "Västtrafik är redan konfigurerad. Använd alternativknappen för att lägga till fler linjer.",
+      "single_instance_allowed": "Endast en Västtrafik-integration stöds."
+    }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "title": "Hantera bevakade linjer",
+        "data": {
+          "action": "Åtgärd"
+        }
+      },
+      "start_stop": {
+        "title": "Var går du på?",
+        "description": "Exempel: {example}",
+        "data": {
+          "stop_name": "Starthållplats"
+        }
+      },
+      "end_stop": {
+        "title": "Var går du av? (valfritt)",
+        "description": "Start: **{start}** — Exempel: {example}",
+        "data": {
+          "end_stop_name": "Sluthållplats (lämna tomt för att hoppa över)"
+        }
+      },
+      "pick_stop": {
+        "title": "Flera hållplatser hittades — välj en",
+        "data": {
+          "picked_stop": "Hållplats"
+        }
+      },
+      "pick_line": {
+        "title": "Vilken linje?",
+        "description": "Linjer som avgår från **{stop}**.",
+        "data": {
+          "line": "Linje"
+        }
+      },
+      "line_manual": {
+        "title": "Ange linjenamn",
+        "description": "Inga liveavgångar vid **{stop}**. Ange linjens kortnamn.",
+        "data": {
+          "line_name": "Linjekortnamn"
+        }
+      },
+      "pick_direction": {
+        "title": "Vilken riktning?",
+        "description": "Linje **{line}** från **{stop}**.",
+        "data": {
+          "direction": "Riktning"
+        }
+      },
+      "line_options": {
+        "title": "Alternativ",
+        "description": "**Linje {line}** från **{stop}** → **{direction}**",
+        "data": {
+          "delay": "Gångtid till hållplats",
+          "name": "Namnprefix",
+          "add_another": "Lägg till en linje till"
+        }
+      },
+      "remove": {
+        "title": "Ta bort bevakade linjer",
+        "description": "Markera linjerna du vill **behålla**. Omarkerade linjer tas bort.",
+        "data": {
+          "keep": "Behåll"
+        }
+      }
+    },
+    "error": {
+      "auth": "Autentisering misslyckades.",
+      "cannot_connect": "Kunde inte nå Västtrafiks API.",
+      "station_required": "Ange en hållplats.",
+      "station_not_found": "Ingen hållplats hittades. Prova att lägga till ort.",
+      "line_required": "Ange ett linjenamn.",
+      "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen."
+    },
+    "abort": {
+      "no_lines": "Inga linjer bevakas just nu."
+    }
+  }
+}

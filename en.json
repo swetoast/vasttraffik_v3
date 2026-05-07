@@ -1,0 +1,90 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Enter Västtrafik API Credentials",
+        "data": { "key": "API Key", "secret": "API Secret" }
+      },
+      "add_what": {
+        "title": "What would you like to add?",
+        "data": { "what": "Type" }
+      },
+      "dep_origin": {
+        "title": "Departure – Origin Stop",
+        "data": { "from": "From (stop name or GID)" }
+      },
+      "dep_destination": {
+        "title": "Departure – Destination (optional)",
+        "data": { "heading": "Towards (stop name, leave blank for any)" }
+      },
+      "dep_options": {
+        "title": "Departure – Options",
+        "data": {
+          "lines": "Lines to track (comma-separated short names)",
+          "delay": "Offset in minutes (walk time to stop)",
+          "name": "Sensor name (optional)",
+          "add_another": "Add another departure monitor"
+        }
+      },
+      "jrn_origin": {
+        "title": "Journey – Origin Stop",
+        "data": { "origin": "From (stop name or GID)" }
+      },
+      "jrn_destination": {
+        "title": "Journey – Destination Stop",
+        "data": { "destination": "To (stop name or GID)" }
+      },
+      "jrn_options": {
+        "title": "Journey – Options",
+        "data": {
+          "journey_count": "Number of upcoming trips to fetch",
+          "only_direct": "Direct connections only",
+          "transport_modes": "Transport modes (BUS,TRAM,TRAIN,FERRY — blank = all)",
+          "name": "Sensor name (optional)",
+          "add_another": "Add another journey planner"
+        }
+      },
+      "vehicle_tracking": {
+        "title": "Vehicle Tracking – Map Area",
+        "description": "Define a bounding box. Vehicles appear on the HA map as device_tracker entities updated every 30 s.",
+        "data": {
+          "bbox_lat_min": "South latitude",
+          "bbox_lon_min": "West longitude",
+          "bbox_lat_max": "North latitude",
+          "bbox_lon_max": "East longitude",
+          "track_lines": "Line GIDs to filter (blank = all vehicles)"
+        }
+      }
+    },
+    "error": {
+      "auth": "Authentication failed – check your API key and secret.",
+      "cannot_connect": "Could not reach the Västtrafik API.",
+      "station_required": "Please enter a station name.",
+      "station_not_found": "No matching stop found.",
+      "station_ambiguous": "Multiple stops matched – add the city (e.g. 'Korsvägen, Göteborg') or use the stop GID."
+    },
+    "abort": {
+      "already_configured": "Västtrafik is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "choose_action": {
+        "title": "Edit Västtrafik Configuration",
+        "data": { "action": "Action" }
+      },
+      "remove_departures": {
+        "title": "Select monitors to keep",
+        "data": { "keep": "Keep" }
+      },
+      "remove_journeys": {
+        "title": "Select journey planners to keep",
+        "data": { "keep": "Keep" }
+      }
+    },
+    "abort": {
+      "no_departures": "No departure monitors configured.",
+      "no_journeys": "No journey planners configured."
+    }
+  }
+}
