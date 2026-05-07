@@ -1,4 +1,4 @@
-# Västtrafik v3 for Home Assistant
+# Västtrafik for Home Assistant
 
 Custom Home Assistant integration for Västtrafik using the Planera Resa v4 API.
 
