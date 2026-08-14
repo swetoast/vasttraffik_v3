@@ -83,8 +83,7 @@
       "unknown": "An unexpected error occurred — check the Home Assistant log for details."
     },
     "abort": {
-      "already_configured": "Västtrafik is already configured. Use the options button to add more lines.",
-      "single_instance_allowed": "Only one Västtrafik integration is supported."
+      "already_configured": "This Västtrafik account is already configured. Use the options button to add more lines."
     }
   },
   "options": {

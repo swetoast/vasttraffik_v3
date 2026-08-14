@@ -73,14 +73,35 @@ def _lines_from_departures(departures: list[dict]) -> list[dict]:
         if not short or short in seen:
             continue
         mode = (line.get("transportMode") or "bus").lower()
-        icon = {"bus": "🚌", "tram": "🚃", "train": "🚆", "ferry": "⛴️"}.get(mode, "🚌")
+        # Plain ASCII label — matches config_flow, avoids emoji rendering issues in the HA UI.
+        icon = {"bus": "Bus", "tram": "Tram", "train": "Train", "ferry": "Ferry"}.get(mode, "Bus")
         seen[short] = {
             "short_name": short,
             "gid": line.get("gid"),
             "transport_mode": mode,
-            "label": f"{icon}  {short}",
+            "label": f"{icon} {short}",
         }
     return sorted(seen.values(), key=lambda x: _natural_sort_key(x["short_name"]))
+
+
+def _details_ref_for(
+    departures: list[dict], line_name: str, direction_str: str | None = None
+) -> str:
+    """Return a detailsReference for a departure matching line (+ optional direction)."""
+    dir_lower = direction_str.lower() if direction_str else None
+    for dep in departures:
+        sj   = dep.get("serviceJourney") or {}
+        line = sj.get("line") or {}
+        if (line.get("shortName") or "") != line_name:
+            continue
+        if dir_lower:
+            d = (sj.get("direction") or "").lower()
+            if d and dir_lower not in d:
+                continue
+        ref = dep.get("detailsReference")
+        if ref:
+            return ref
+    return ""
 
 
 def _directions_for_line(departures: list[dict], line_name: str) -> list[dict]:
@@ -95,11 +116,12 @@ def _directions_for_line(departures: list[dict], line_name: str) -> list[dict]:
         ).strip()
         if not direction or direction in seen:
             continue
-        dest = dep.get("destinationStopArea") or {}
+        # v4 departures carry no destinationStopArea, so a terminus GID can't be
+        # resolved here; direction filtering is done client-side by the entities.
         seen[direction] = {
             "direction": direction,
-            "direction_gid": dest.get("gid") or None,
-            "label": f"→  {direction}",
+            "direction_gid": None,
+            "label": f"to {direction}",
         }
     return list(seen.values())
 
@@ -162,6 +184,20 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             _LOGGER.error("Options: adapter init failed: %s", exc, exc_info=True)
             return False
 
+    async def _resolve_direction_gid(self, line_name: str, direction_str: str) -> str:
+        """Resolve the terminus stop-area gid for the chosen line+direction (best-effort)."""
+        ref = _details_ref_for(self._live_departures, line_name, direction_str)
+        if not ref or not self._adapter:
+            return ""
+        try:
+            gid = await self.hass.async_add_executor_job(
+                self._adapter.resolve_terminus_gid, self._start_gid, ref
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Options: directionGid resolution failed: %s", exc)
+            return ""
+        return gid or ""
+
     # ── Entry point ───────────────────────────────────────────────────────────
 
     async def async_step_init(self, user_input: dict | None = None) -> dict:
@@ -178,12 +214,12 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_language()
             return self._save()
 
-        options = [{"value": "add", "label": "➕  Add a monitored line"}]
+        options = [{"value": "add", "label": "Add a monitored line"}]
         if self._monitored:
-            options.append({"value": "remove", "label": "🗑️  Remove a monitored line"})
+            options.append({"value": "remove", "label": "Remove a monitored line"})
         lang_label = SUPPORTED_LANGUAGES.get(self._language, self._language)
-        options.append({"value": "language", "label": f"🌐  Language: {lang_label}"})
-        options.append({"value": "save", "label": "✅  Save and close"})
+        options.append({"value": "language", "label": f"Language: {lang_label}"})
+        options.append({"value": "save", "label": "Save and close"})
 
         return self.async_show_form(
             step_id="menu",
@@ -403,6 +439,10 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 if best:
                     self._direction     = best["direction"]
                     self._direction_gid = best["direction_gid"] or ""
+                    if not self._direction_gid:
+                        self._direction_gid = await self._resolve_direction_gid(
+                            short, self._direction
+                        )
                     return await self.async_step_line_options()
 
             return await self.async_step_pick_direction()
@@ -451,10 +491,14 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 match = next((d for d in dirs if d["direction"] == chosen), None)
                 self._direction     = chosen
                 self._direction_gid = (match or {}).get("direction_gid") or ""
+                if not self._direction_gid:
+                    self._direction_gid = await self._resolve_direction_gid(
+                        self._line_name, chosen
+                    )
             return await self.async_step_line_options()
 
         dirs    = _directions_for_line(self._live_departures, self._line_name)
-        options = [{"value": "__any__", "label": "🔀  Any direction"}]
+        options = [{"value": "__any__", "label": "Any direction"}]
         options += [{"value": d["direction"], "label": d["label"]} for d in dirs]
         return self.async_show_form(
             step_id="pick_direction",

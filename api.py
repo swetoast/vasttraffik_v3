@@ -114,6 +114,13 @@ class VtjpAdapter:
         """
         Fetch stop-area metadata including coordinates.
 
+        ⚠️ EXPENSIVE — DO NOT POLL. The v4 `/stop-areas` endpoint has no filter
+        parameter (confirmed in the Swagger); it returns the ENTIRE stop-area
+        registry (thousands of entries), which we then scan in-process for one gid.
+        This is currently unused — entity coordinates come from the departure's
+        stopPoint instead. If you ever need it, call it once and cache the result
+        (the endpoint supports If-None-Match / 304 for cheap revalidation).
+
         OAS: GET /stop-areas returns [{gid, name, lat, long}]
         Note: the coordinate fields are 'lat' and 'long' (NOT 'latitude'/'longitude')
         on the StopAreaApiModel. The returned dict normalises both to ensure
@@ -141,6 +148,7 @@ class VtjpAdapter:
         when: Any = None,
         direction_gid: str | None = None,
         limit: int = 20,
+        time_span_minutes: int | None = None,
     ) -> list[dict]:
         """
         Upcoming departures from a stop area.
@@ -158,17 +166,20 @@ class VtjpAdapter:
           detailsReference               — use to fetch details / coordinates / occupancy
           serviceJourney.line.shortName / transportMode / backgroundColor / isWheelchairAccessible
           serviceJourney.direction       — direction label string
-          serviceJourney.isRealtimeJourney — true for emergency extra trips (no vehicle type info)
+          serviceJourney.line.isRealtimeJourney — true for emergency extra trips (no vehicle type info)
           stopPoint.{platform, latitude, longitude}
           realtimeStopPoint              — populated when stop is moved; use instead of stopPoint
           isCancelled / isPartCancelled
-          occupancy.level                (low/medium/high) — requires includeOccupancy=true
+          occupancy.level                (low/medium/high/incomplete/missing/notpublictransport) — requires includeOccupancy=true
         """
         params: dict[str, Any] = {"limit": limit, "includeOccupancy": "true"}
         if when is not None:
             params["startDateTime"] = when.isoformat()
         if direction_gid:
             params["directionGid"] = direction_gid
+        if time_span_minutes is not None:
+            # API accepts 0..1440; clamp to be safe.
+            params["timeSpanInMinutes"] = max(0, min(1440, int(time_span_minutes)))
         data = self._get(f"/stop-areas/{quote(stop_gid, safe='')}/departures", params)
         return self._list(data, "results")
 
@@ -202,6 +213,36 @@ class VtjpAdapter:
             f"/departures/{quote(details_reference, safe='')}/details",
             params,
         )
+
+    def resolve_terminus_gid(self, stop_gid: str, details_reference: str) -> str:
+        """
+        Resolve the terminus (final call) stop-AREA gid for a departure's service journey.
+
+        The departures endpoint's `directionGid` filter matches on the journey's last
+        stop area (REST.md §10.1.2). That gid isn't present on the plain departure
+        object, but it can be read from the details call:
+            serviceJourneys[0].callsOnServiceJourney[-1].stopPoint.stopArea.gid
+        (verified against the v4 Swagger: CallDetailsApiModel.stopPoint is a
+        JourneyDetails.StopPointApiModel, which carries a nested stopArea{gid}).
+
+        Returns "" on any failure — callers then fall back to client-side filtering.
+        """
+        try:
+            data = self.get_departure_details(
+                stop_gid, details_reference, includes=["servicejourneycalls"]
+            )
+            sjs = data.get("serviceJourneys") or []
+            if not sjs:
+                return ""
+            calls = (sjs[0] or {}).get("callsOnServiceJourney") or []
+            if not calls:
+                return ""
+            last = calls[-1] or {}
+            stop_area = (last.get("stopPoint") or {}).get("stopArea") or {}
+            return stop_area.get("gid") or ""
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Terminus GID resolution failed for %s: %s", details_reference, exc)
+            return ""
 
     def get_arrivals(
         self,
@@ -306,19 +347,22 @@ class VtjpAdapter:
         destination_gid: str,
     ) -> list[dict]:
         """
-        Cheapest ticket products for a journey between two stop areas.
+        Least-expensive ticket products (adult + youth) between two stop areas.
 
         OAS: GET /products/journeyticket?originGid=...&destinationGid=...
+        Verified against the v4 Swagger (tag "Products").
 
-        Response: list of {
-          ticketName: str,
-          productType: "single" | ...,
-          configurations: [{
-            productId, validityLength, itemPrice,
-            ageType: "adult" | "youth" | "senior" | ...,
-            zoneIds: [str],
-          }]
-        }
+        Response: list of TicketSpecificationApiModel:
+            {
+              ticketName: str,
+              productType: "single" | "period" | "shortterm" | ...,   (ProductTypeEnum)
+              configurations: [ TicketConfigurationApiModel {
+                  productId, validityLength, itemPrice (SEK, double),
+                  offerSpecification,
+                  ageType: "adult" | "youth" | "senior" | "schoolyouth" | "other",
+                  zoneIds: [str],
+              } ]
+            }
 
         Returns [] on any error (ticket pricing is informational, not critical).
         """

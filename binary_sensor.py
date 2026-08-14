@@ -26,9 +26,11 @@ If CONF_LINE_GID is available: GET /traffic-situations/line/{gid}
 If only CONF_STOP_GID available: GET /traffic-situations/stoparea/{gid}
   → returns all situations at the stop; client-side filter by designation
 
-Then: if we know the current service_journey_gid from the departure sensor,
-also query GET /traffic-situations/journey/{gid} and merge results.
-This catches journey-specific disruptions (e.g. one specific trip cancelled).
+Note: a per-journey query (GET /traffic-situations/journey/{gid}) is available in
+the API and could catch trip-specific disruptions, but it needs the live
+service_journey_gid, which this entity does not have access to (it lives on the
+departure sensor). It is intentionally not merged here; the adapter method
+get_traffic_situations_for_journey exists for a future coordinator-based design.
 """
 from __future__ import annotations
 
@@ -54,7 +56,7 @@ from .const import (
     DOMAIN,
     SEVERITY_ORDER,
 )
-from .sensor import device_info_for_line
+from .sensor import device_info_for_line, dir_key_for_line
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = DISRUPTION_SCAN_INTERVAL
@@ -115,7 +117,7 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
         stop_gid  = ml.get(CONF_STOP_GID, "")
         line_name = ml.get(CONF_LINE_NAME, "")
 
-        self._attr_unique_id   = f"{entry_id}_dis_{stop_gid}_{line_name}"
+        self._attr_unique_id   = f"{entry_id}_dis_{stop_gid}_{line_name}_{dir_key_for_line(ml)}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
 
         self._disruptions: list[dict] = []

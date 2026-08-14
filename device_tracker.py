@@ -66,11 +66,11 @@ from .const import (
     DOMAIN,
     VEHICLE_SCAN_INTERVAL,
 )
-from .sensor import _MODE_ICON, device_info_for_line
+from .sensor import _MODE_ICON, device_info_for_line, dir_key_for_line
 
 _LOGGER     = logging.getLogger(__name__)
 _LOOKBACK   = timedelta(minutes=10)
-_BBOX_DEG   = 0.15   # ≈ 12 km bounding box half-width
+_BBOX_DEG   = 0.15   # half-width in degrees (~17 km N–S, ~9 km E–W at Gothenburg's latitude)
 
 
 async def async_setup_entry(
@@ -80,9 +80,10 @@ async def async_setup_entry(
 ) -> None:
     store = hass.data[DOMAIN][entry.entry_id]
     api: VtjpAdapter = store["api"]
+    coordinators = store["coordinators"]
 
     entities = [
-        VasttrafikVehicleTracker(hass, api, ml, entry.entry_id, i)
+        VasttrafikVehicleTracker(hass, api, coordinators[i], ml, entry.entry_id, i)
         for i, ml in enumerate(store["config"].get(CONF_MONITORED_LINES, []))
     ]
     if not entities:
@@ -92,8 +93,13 @@ async def async_setup_entry(
 
     async def _tick(_dt: Any = None) -> None:
         for tracker in entities:
-            await tracker.async_update()
-            tracker.async_write_ha_state()
+            # Isolate each tracker: an error in one (e.g. during interpolation)
+            # must not stop the remaining trackers from updating this tick.
+            try:
+                await tracker.async_update()
+                tracker.async_write_ha_state()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Vehicle tracker update failed for %s", tracker.entity_id)
 
     entry.async_on_unload(
         async_track_time_interval(hass, _tick, VEHICLE_SCAN_INTERVAL)
@@ -112,18 +118,20 @@ class VasttrafikVehicleTracker(TrackerEntity):
         self,
         hass: HomeAssistant,
         api: VtjpAdapter,
+        coordinator: Any,
         ml: dict,
         entry_id: str,
         idx: int,
     ) -> None:
         self.hass = hass
         self._api = api
+        self._coordinator = coordinator
         self._ml  = ml
 
         stop_gid    = ml.get(CONF_STOP_GID, "")
         line_name   = ml.get(CONF_LINE_NAME, "")
         # Match departure sensor's unique_id key structure so both share device group correctly
-        dir_key     = ml.get(CONF_DIRECTION_GID) or ml.get("end_stop_gid") or "any"
+        dir_key     = dir_key_for_line(ml)
 
         self._attr_unique_id   = f"{entry_id}_vt_{stop_gid}_{line_name}_{dir_key}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
@@ -143,6 +151,11 @@ class VasttrafikVehicleTracker(TrackerEntity):
 
         # Set True on first 404/501 from /positions to avoid repeated retries
         self._positions_unavailable = False
+
+        # Cache the journey GPS path (coords, calls) per detailsReference so the
+        # heavy details call runs once per trip instead of every 60 s tick.
+        self._path_cache_ref: str | None = None
+        self._path_cache: tuple[list[dict], list[dict]] | None = None
 
     # ── TrackerEntity ─────────────────────────────────────────────────────────
 
@@ -175,24 +188,14 @@ class VasttrafikVehicleTracker(TrackerEntity):
     async def async_update(self) -> None:
         stop_gid       = self._ml[CONF_STOP_GID]
         line_name      = self._ml[CONF_LINE_NAME]
-        direction_gid  = self._ml.get(CONF_DIRECTION_GID) or None
         direction_str  = self._ml.get(CONF_DIRECTION) or None
         current_time   = ha_now()
-        fetch_from     = current_time - self._delay - _LOOKBACK
 
-        # ── 1. Fetch departures filtered by direction at API level ────────────
-        def _fetch_deps() -> list[dict]:
-            return self._api.get_departures(
-                stop_gid,
-                when=fetch_from,
-                direction_gid=direction_gid,   # server-side direction filter
-                limit=20,
-            )
-
-        try:
-            departures = await self.hass.async_add_executor_job(_fetch_deps)
-        except Exception as exc:
-            _LOGGER.debug("Tracker departure fetch failed: %s", exc, exc_info=True)
+        # ── 1. Read departures from the shared coordinator (no own fetch) ──────
+        # The coordinator already fetches a look-back window (server-side filtered
+        # by directionGid when known); this tick reuses that cached data.
+        departures = self._coordinator.data or []
+        if not departures:
             self._available = False
             return
 
@@ -208,7 +211,7 @@ class VasttrafikVehicleTracker(TrackerEntity):
         )
         if dep is None:
             self._available = False
-            dir_label = direction_str or (f"direction GID {direction_gid}" if direction_gid else "any direction")
+            dir_label = direction_str or "any direction"
             self._extra = {
                 "status": f"No active service for line {line_name} ({dir_label})"
             }
@@ -335,7 +338,16 @@ class VasttrafikVehicleTracker(TrackerEntity):
     async def _fetch_journey_path(
         self, stop_gid: str, details_ref: str
     ) -> tuple[list[dict], list[dict]] | None:
-        """Fetch departure details with service journey coordinates and calls."""
+        """
+        Fetch departure details with service journey coordinates and calls.
+
+        The route geometry + stop calls are fixed for a given trip, so the result
+        is cached per detailsReference — the heavy details call then runs once per
+        trip instead of on every 60 s tracker tick.
+        """
+        if self._path_cache_ref == details_ref and self._path_cache is not None:
+            return self._path_cache
+
         def _fetch() -> dict:
             return self._api.get_departure_details(
                 stop_gid,
@@ -366,6 +378,9 @@ class VasttrafikVehicleTracker(TrackerEntity):
             )
             return None
 
+        # Cache for the lifetime of this trip's detailsReference.
+        self._path_cache_ref = details_ref
+        self._path_cache = (coords, calls)
         return coords, calls
 
 
@@ -384,10 +399,13 @@ def _find_departure(
       1. Line shortName must match exactly.
       2. If direction_str is configured, serviceJourney.direction must contain it
          (case-insensitive substring match — handles partial names like "Frölunda").
-      3. Prefer a recently-departed vehicle over an upcoming one.
+      3. Prefer the MOST RECENTLY departed vehicle (the one currently en route),
+         otherwise the soonest upcoming one.
     """
-    best_past:   tuple[dict, str] | None = None
-    best_future: tuple[dict, str] | None = None
+    best_past:      tuple[dict, str] | None = None
+    best_past_t:    datetime | None = None
+    best_future:    tuple[dict, str] | None = None
+    best_future_t:  datetime | None = None
     dir_lower = direction_str.lower() if direction_str else None
 
     for dep in departures:
@@ -416,10 +434,14 @@ def _find_departure(
             continue
 
         if t <= now:
-            if best_past is None:
-                best_past = (dep, ref)
-        elif best_future is None:
-            best_future = (dep, ref)
+            # Keep the latest past departure (closest to now = the bus still running),
+            # not merely the first one seen in the lookback window.
+            if best_past_t is None or t > best_past_t:
+                best_past, best_past_t = (dep, ref), t
+        else:
+            # Keep the earliest upcoming departure.
+            if best_future_t is None or t < best_future_t:
+                best_future, best_future_t = (dep, ref), t
 
     chosen = best_past or best_future
     return (chosen[0], chosen[1]) if chosen else (None, None)

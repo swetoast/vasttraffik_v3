@@ -62,7 +62,7 @@
       },
       "line_options": {
         "title": "All set!",
-        "description": "**Line {line}** from **{stop}** → **{direction}**\n\nThree entities will be created automatically:\n- 🕐  **Departure time** — next bus with realtime delay and platform\n- ⚠️  **Störning** — live service disruption alerts\n- 📍  **Position** — vehicle location on the map (interpolated, updated every 30 s)",
+        "description": "**Line {line}** from **{stop}** → **{direction}**\n\nThree entities will be created automatically:\n- 🕐  **Departure time** — next bus with realtime delay and platform\n- ⚠️  **Störning** — live service disruption alerts\n- 📍  **Position** — vehicle location on the map (interpolated, updated every 60 s)",
         "data": {
           "delay": "Walk time to stop",
           "name": "Name",
@@ -83,8 +83,7 @@
       "unknown": "An unexpected error occurred — check the HA log for details."
     },
     "abort": {
-      "already_configured": "Västtrafik is already configured. Use the ⚙️ button to add more lines.",
-      "single_instance_allowed": "Only one Västtrafik integration is supported."
+      "already_configured": "This Västtrafik account is already configured. Use the ⚙️ button to add more lines."
     }
   },
   "options": {

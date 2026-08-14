@@ -12,11 +12,14 @@ Steps
 No separate direction step.  If an endpoint was given the direction is
 derived automatically; otherwise all departures on the chosen line are shown.
 
-Bug fixes vs previous version
-──────────────────────────────
-• Removed cross-step chaining (pick_line → pick_direction) which caused
-  HA's flow runner to update cur_step after the request was already
-  answered, so the following submit called the wrong handler.
+Design notes
+─────────────
+• This flow has no separate pick_direction step: when an endpoint is given the
+  direction is derived from it, otherwise all departures on the line are shown.
+  (The options flow DOES keep an explicit pick_direction step for its "add line"
+  path — that is intentional, not an inconsistency. Chaining one step into the
+  next via `return await self.async_step_x()` is a normal HA pattern and is used
+  in both flows.)
 • All API calls use named inner functions instead of lambdas so exceptions
   produce full tracebacks in the HA log.
 • All transient per-iteration state lives in plain instance variables that
@@ -124,6 +127,11 @@ def _best_direction_for_endpoint(
     Scan departures of *line_name* and return the (direction, direction_gid)
     whose label best matches *end_name*.  Returns ("", "") if no match.
     """
+    # NOTE: the v4 departure model has no destinationStopArea field, so a terminus
+    # stop-area GID (what the API's directionGid filter needs) cannot be resolved
+    # from a departure. We return the direction *text* only and rely on the
+    # client-side direction filter in the sensor and tracker. The gid slot stays ""
+    # for backward compatibility with callers.
     end_lower = end_name.lower()
     best_dir = ""
     best_gid = ""
@@ -133,23 +141,36 @@ def _best_direction_for_endpoint(
             line = sj.get("line") or {}
             if (line.get("shortName") or "") != line_name:
                 continue
-            direction = (
-                sj.get("direction") or ""
-            ).strip()
+            direction = (sj.get("direction") or "").strip()
             if not direction:
                 continue
             if end_lower in direction.lower():
-                dest    = dep.get("destinationStopArea") or {}
-                dir_gid = dest.get("gid") or ""
-                return direction, dir_gid
-            # Keep the first direction as fallback
-            if not best_dir:
-                dest    = dep.get("destinationStopArea") or {}
+                return direction, ""
+            if not best_dir:          # keep the first direction seen as a fallback
                 best_dir = direction
-                best_gid = dest.get("gid") or ""
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("Skipping departure while scanning directions: %s", exc)
     return best_dir, best_gid
+
+
+def _details_ref_for(
+    departures: list[dict], line_name: str, direction_str: str | None = None
+) -> str:
+    """Return a detailsReference for a departure matching line (+ optional direction)."""
+    dir_lower = direction_str.lower() if direction_str else None
+    for dep in departures:
+        sj   = dep.get("serviceJourney") or {}
+        line = sj.get("line") or {}
+        if (line.get("shortName") or "") != line_name:
+            continue
+        if dir_lower:
+            d = (sj.get("direction") or "").lower()
+            if d and dir_lower not in d:
+                continue
+        ref = dep.get("detailsReference")
+        if ref:
+            return ref
+    return ""
 
 
 # ─────────────────────────── Config flow ─────────────────────────────────────
@@ -228,6 +249,11 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "cannot_connect"
 
             if not errors:
+                # One config entry per API credential — monitored lines are managed
+                # within the entry via the options flow. This makes the
+                # "already_configured" abort reachable and blocks duplicate accounts.
+                await self.async_set_unique_id(self._key)
+                self._abort_if_unique_id_configured()
                 return await self.async_step_start_stop()
 
         lang_options = [
@@ -467,9 +493,9 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_pick_line(self, user_input: dict | None = None) -> dict:
         """
         Show all available lines as a selection list.
-        On submit: resolve direction from endpoint (or leave as 'any'),
-        then advance DIRECTLY to line_options without chaining through
-        another step — this avoids the cur_step de-sync bug.
+        On submit: resolve direction from the endpoint (or leave as 'any'), then
+        go straight to line_options. There is deliberately no pick_direction step
+        in this flow — the endpoint already determines the direction.
         """
         errors: dict = {}
 
@@ -501,6 +527,14 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else:
                         self._direction     = ""
                         self._direction_gid = ""
+
+                    # Resolve the real directionGid (terminus stop-area) so the API
+                    # can filter by direction server-side. Best-effort; falls back to
+                    # client-side filtering when it can't be resolved.
+                    if self._direction and not self._direction_gid:
+                        self._direction_gid = await self._resolve_direction_gid(
+                            short, self._direction
+                        )
 
                 except Exception as exc:
                     _LOGGER.error(
@@ -642,6 +676,17 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
 
     # ── Helpers ────────────────────────────────────────────────────────────────
+
+    async def _resolve_direction_gid(self, line_name: str, direction_str: str) -> str:
+        """Resolve the terminus stop-area gid for the chosen line+direction (best-effort)."""
+        ref = _details_ref_for(self._live_departures, line_name, direction_str)
+        if not ref or not self._adapter:
+            return ""
+        gid = await self.hass.async_add_executor_job(
+            self._adapter.resolve_terminus_gid, self._start_gid, ref
+        )
+        _LOGGER.debug("Resolved directionGid for %s → %r: %s", line_name, direction_str, gid)
+        return gid or ""
 
     def _create_entry(self) -> dict:
         return self.async_create_entry(

@@ -5,14 +5,16 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util.dt import now
 
 from .api import VtjpAdapter
+from .coordinator import VasttrafikDepartureCoordinator
 from ._helpers import parse_dt, to_float  # noqa: F401 (to_float re-exported for device_tracker)
 from .const import (
     CONF_DELAY,
@@ -52,11 +54,36 @@ _MODE_LABEL: dict[str, str] = {
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
+def dir_key_for_line(ml: dict) -> str:
+    """
+    Stable direction discriminator for a monitored line.
+
+    Without this, two monitored lines that share the same stop + line but head in
+    opposite directions collapse onto the same device / unique_id.
+
+    Preference: direction GID → destination stop GID → a slug of the direction
+    text → "any". The direction-text fallback matters because the v4 departures
+    model has no destinationStopArea field, so CONF_DIRECTION_GID is in practice
+    never stored — a direction-only setup (chosen via the options "pick direction"
+    step) would otherwise fall through to "any" for both directions and collide.
+    """
+    direction_slug = (ml.get(CONF_DIRECTION) or "").strip().lower().replace(" ", "_")
+    return (
+        ml.get(CONF_DIRECTION_GID)
+        or ml.get(CONF_END_STOP_GID)
+        or direction_slug
+        or "any"
+    )
+
+
 def device_info_for_line(entry_id: str, ml: dict) -> DeviceInfo:
     """
     Build a DeviceInfo that is identical across all three entity platforms
     for the same monitored-line entry.  Passing the same identifiers groups
     sensor + binary_sensor + device_tracker under one device card in HA.
+
+    The direction discriminator is part of the identifier so the same line at the
+    same stop in two directions produces two distinct devices (not one merged card).
     """
     stop_gid  = ml.get(CONF_STOP_GID, "")
     line_name = ml.get(CONF_LINE_NAME, "")
@@ -70,20 +97,12 @@ def device_info_for_line(entry_id: str, ml: dict) -> DeviceInfo:
         )
 
     return DeviceInfo(
-        identifiers={(DOMAIN, f"{entry_id}_{stop_gid}_{line_name}")},
+        identifiers={(DOMAIN, f"{entry_id}_{stop_gid}_{line_name}_{dir_key_for_line(ml)}")},
         name=device_name,
         manufacturer="Västtrafik",
         model=_MODE_LABEL.get(mode, "Transit"),
         entry_type=DeviceEntryType.SERVICE,
     )
-
-
-
-
-    try:
-        return parse_dt(value)
-    except (ValueError, TypeError):
-        return None
 
 
 def _best_departure_dt(dep: dict) -> datetime | None:
@@ -124,21 +143,25 @@ async def async_setup_entry(
 ) -> None:
     store = hass.data[DOMAIN][entry.entry_id]
     api: VtjpAdapter = store["api"]
+    coordinators: list[VasttrafikDepartureCoordinator] = store["coordinators"]
     entities: list[SensorEntity] = []
 
     for i, ml in enumerate(store["config"].get(CONF_MONITORED_LINES, [])):
-        entities.append(VasttrafikDepartureSensor(hass, api, ml, entry.entry_id, i))
+        coordinator = coordinators[i]
+        entities.append(VasttrafikDepartureSensor(coordinator, ml, entry.entry_id, i))
         # Ticket sensor — only when an end stop is configured
         if ml.get(CONF_END_STOP_GID) and ml.get(CONF_STOP_GID):
             entities.append(VasttrafikTicketSensor(hass, api, ml, entry.entry_id, i))
 
     if entities:
+        # Departure sensors (CoordinatorEntity) compute state in __init__; the ticket
+        # sensor still needs an initial poll — update_before_add is a no-op for the former.
         async_add_entities(entities, update_before_add=True)
 
 
 # ── Sensor entity ──────────────────────────────────────────────────────────────
 
-class VasttrafikDepartureSensor(SensorEntity):
+class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
     """
     Departure sensor.
 
@@ -146,29 +169,27 @@ class VasttrafikDepartureSensor(SensorEntity):
               → HA renders this as 'in 4 min' / '14:32' in the UI automatically
     Attrs   : platform, delay, is_realtime, upcoming (next 3), service_journey_gid
     Device  : shared with the Störning binary_sensor and Position device_tracker
+    Data    : the shared VasttrafikDepartureCoordinator (also feeds the tracker).
     """
 
     _attr_has_entity_name  = True
     _attr_name             = None          # primary entity → uses device name
     _attr_device_class     = SensorDeviceClass.TIMESTAMP
     _attr_attribution      = "Data provided by Västtrafik"
-    _attr_should_poll      = True
 
     def __init__(
         self,
-        hass: HomeAssistant,
-        api: VtjpAdapter,
+        coordinator: VasttrafikDepartureCoordinator,
         ml: dict,
         entry_id: str,
         idx: int,
     ) -> None:
-        self.hass   = hass
-        self._api   = api
+        super().__init__(coordinator)
         self._ml    = ml
 
         stop_gid    = ml.get(CONF_STOP_GID, "")
         line_name   = ml.get(CONF_LINE_NAME, "")
-        dir_key     = ml.get(CONF_DIRECTION_GID) or ml.get("end_stop_gid") or "any"
+        dir_key     = dir_key_for_line(ml)
 
         # Content-based unique ID — survives re-ordering of lines in config
         self._attr_unique_id  = f"{entry_id}_dep_{stop_gid}_{line_name}_{dir_key}"
@@ -180,6 +201,8 @@ class VasttrafikDepartureSensor(SensorEntity):
         self._delay             = timedelta(minutes=ml.get(CONF_DELAY, DEFAULT_DELAY))
         self._departure_dt: datetime | None = None
         self._extra: dict[str, Any] = {}
+        # Coordinator data is already available (refreshed at setup) — compute now.
+        self._process()
 
     # ── SensorEntity ──────────────────────────────────────────────────────────
 
@@ -199,37 +222,43 @@ class VasttrafikDepartureSensor(SensorEntity):
             **self._extra,
         }
 
-    # ── Update ────────────────────────────────────────────────────────────────
+    # ── Coordinator-driven update ───────────────────────────────────────────────
 
-    async def async_update(self) -> None:
-        stop_gid      = self._ml[CONF_STOP_GID]
-        line_name     = self._ml[CONF_LINE_NAME]
-        direction_gid = self._ml.get(CONF_DIRECTION_GID) or None
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._process()
+        self.async_write_ha_state()
+
+    def _process(self) -> None:
+        """Recompute state + attributes from the shared coordinator's departures."""
+        departures = self.coordinator.data or []
+        line_name     = self._ml.get(CONF_LINE_NAME, "")
+        direction_str = self._ml.get(CONF_DIRECTION) or None
         target        = now() + self._delay
 
-        def _fetch() -> list[dict]:
-            return self._api.get_departures(
-                stop_gid,
-                when=target,
-                direction_gid=direction_gid,
-                limit=10,
-            )
+        # line + direction, not cancelled, at least `delay` minutes out, earliest first.
+        # The coordinator's window includes just-departed trips (for the tracker), so
+        # the `>= target` filter and sort are what make "next departure" correct here.
+        dir_lower = direction_str.lower() if direction_str else None
+        candidates: list[tuple[datetime, dict]] = []
+        for dep in departures:
+            if dep.get("isCancelled"):
+                continue
+            sj   = dep.get("serviceJourney") or {}
+            line = sj.get("line") or {}
+            if (line.get("shortName") or "") != line_name:
+                continue
+            if dir_lower:
+                d = (sj.get("direction") or "").lower()
+                if d and dir_lower not in d:
+                    continue
+            t = _best_departure_dt(dep)
+            if t is None or t < target:
+                continue
+            candidates.append((t, dep))
 
-        try:
-            departures = await self.hass.async_add_executor_job(_fetch)
-        except Exception as exc:
-            _LOGGER.warning(
-                "Departure fetch failed for %s: %s",
-                self._attr_unique_id, exc, exc_info=True,
-            )
-            return
-
-        # Filter to the configured line
-        relevant = [
-            dep for dep in departures
-            if not dep.get("isCancelled")
-            and (dep.get("serviceJourney") or {}).get("line", {}).get("shortName") == line_name
-        ]
+        candidates.sort(key=lambda x: x[0])
+        relevant = [dep for _, dep in candidates]
 
         if not relevant:
             self._departure_dt = None
@@ -269,9 +298,10 @@ class VasttrafikDepartureSensor(SensorEntity):
         # Wheelchair accessibility from line metadata
         wheelchair = line.get("isWheelchairAccessible")
 
-        # isRealtimeJourney: emergency/extra trip inserted at short notice (REST.md 6.2.3)
-        # When true, vehicle type info is unavailable
-        is_realtime_journey = sj.get("isRealtimeJourney", False)
+        # isRealtimeJourney: emergency/extra trip inserted at short notice (REST.md 6.2.3).
+        # Per the v4 Swagger this flag lives on the LINE model, not serviceJourney.
+        # When true, vehicle type info is unavailable.
+        is_realtime_journey = line.get("isRealtimeJourney", False)
 
         # Line branding colours (for custom dashboard cards)
         bg_color = line.get("backgroundColor")
@@ -333,7 +363,8 @@ class VasttrafikTicketSensor(SensorEntity):
     _attr_has_entity_name   = True
     _attr_name              = "Biljettpris"
     _attr_device_class      = SensorDeviceClass.MONETARY
-    _attr_state_class       = SensorStateClass.TOTAL   # only valid values for monetary: None or total
+    # A spot price is not an accumulating total — leave state_class unset so HA's
+    # long-term statistics don't try to sum it (TOTAL was wrong here).
     _attr_native_unit_of_measurement = "SEK"
     _attr_icon              = "mdi:ticket"
     _attr_attribution       = "Data provided by Västtrafik"
@@ -354,7 +385,7 @@ class VasttrafikTicketSensor(SensorEntity):
         stop_gid  = ml.get(CONF_STOP_GID, "")
         line_name = ml.get(CONF_LINE_NAME, "")
 
-        self._attr_unique_id   = f"{entry_id}_ticket_{stop_gid}_{line_name}"
+        self._attr_unique_id   = f"{entry_id}_ticket_{stop_gid}_{line_name}_{dir_key_for_line(ml)}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
 
         self._price: float | None = None
@@ -398,7 +429,8 @@ class VasttrafikTicketSensor(SensorEntity):
         if not tickets:
             return
 
-        # Find the cheapest adult single ticket
+        # TicketSpecificationApiModel[].configurations[] — verified against the v4 Swagger.
+        # Pick the cheapest adult fare; expose the full breakdown as an attribute.
         cheapest: float | None = None
         structured: list[dict] = []
         for ticket in tickets:
