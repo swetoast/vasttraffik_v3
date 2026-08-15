@@ -152,6 +152,9 @@ class VasttrafikVehicleTracker(TrackerEntity):
         # Set True on first 404/501 from /positions to avoid repeated retries
         self._positions_unavailable = False
 
+        # Realtime journey notes captured from the latest /positions hit.
+        self._position_notes: list[str] = []
+
         # Cache the journey GPS path (coords, calls) per detailsReference so the
         # heavy details call runs once per trip instead of every 60 s tick.
         self._path_cache_ref: str | None = None
@@ -194,7 +197,7 @@ class VasttrafikVehicleTracker(TrackerEntity):
         # ── 1. Read departures from the shared coordinator (no own fetch) ──────
         # The coordinator already fetches a look-back window (server-side filtered
         # by directionGid when known); this tick reuses that cached data.
-        departures = self._coordinator.data or []
+        departures = (self._coordinator.data or {}).get("departures") or []
         if not departures:
             self._available = False
             return
@@ -244,6 +247,7 @@ class VasttrafikVehicleTracker(TrackerEntity):
                     "details_reference": details_ref,
                     "departed_at":      dep_time.strftime("%H:%M") if dep_time else None,
                     "position_source":  "realtime_gps",
+                    "notes":            self._position_notes,
                 }
                 return
 
@@ -321,6 +325,10 @@ class VasttrafikVehicleTracker(TrackerEntity):
 
         # The first (and should be only) result is our exact vehicle
         pos = positions[0]
+        # Realtime journey notes (NoteApiModel: text/severity) — surfaced as an attribute.
+        self._position_notes = [
+            n.get("text") for n in (pos.get("notes") or []) if n.get("text")
+        ]
         lat_v = to_float(pos.get("latitude"))   # top-level per OAS spec
         lon_v = to_float(pos.get("longitude"))   # top-level per OAS spec
         if lat_v is not None and lon_v is not None:

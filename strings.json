@@ -12,6 +12,14 @@
           "secret": "Stored securely and never shown again"
         }
       },
+      "reauth_confirm": {
+        "title": "Reconnect to Västtrafik",
+        "description": "The stored credentials were rejected. Enter a valid API key and secret to reconnect.",
+        "data": {
+          "key": "API Key",
+          "secret": "API Secret"
+        }
+      },
       "start_stop": {
         "title": "Where do you board?",
         "description": "Enter the name of your boarding stop. If multiple matches are found you will be shown a list to pick from.\n\nExample: {example}",
@@ -83,7 +91,14 @@
       "unknown": "An unexpected error occurred — check the HA log for details."
     },
     "abort": {
-      "already_configured": "This Västtrafik account is already configured. Use the ⚙️ button to add more lines."
+      "already_configured": "This Västtrafik account is already configured. Use the ⚙️ button to add more lines.",
+      "reauth_successful": "Västtrafik reconnected successfully."
+    }
+  },
+  "issues": {
+    "storning_unavailable": {
+      "title": "Västtrafik disruption data unavailable",
+      "description": "The Störning (disruption) API returned an access error. This is a separate subscription on developer.vasttrafik.se — grant the TrafficSituations API to your application to enable the disruption sensors. Until then they stay off."
     }
   },
   "options": {

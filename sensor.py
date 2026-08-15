@@ -134,6 +134,39 @@ def _planned_departure_dt(dep: dict) -> datetime | None:
     return parse_dt(dep.get("plannedTime"))
 
 
+# Human labels for the boolean service flags on DirectionDetailsApiModel.
+_DIRECTION_FLAG_LABELS: dict[str, str] = {
+    "isExtraBus":            "extra_bus",
+    "isExtraBoat":           "extra_boat",
+    "isExtraTram":           "extra_tram",
+    "isExpressBus":          "express_bus",
+    "isSchoolBus":           "school_bus",
+    "isDirectDestinationBus": "direct_bus",
+    "isSwimmingService":     "swimming_service",
+    "isFrontEntry":          "front_entry",
+    "isFreeService":         "free_service",
+    "isPaidService":         "paid_service",
+}
+
+
+def _direction_extras(sj: dict) -> dict[str, Any]:
+    """
+    Pull the useful bits out of serviceJourney.directionDetails (v4 Swagger).
+
+    Returns: via, short_direction, replaces_line, fortifies_line, and a
+    service_flags list containing only the flags that are set to true.
+    """
+    dd = sj.get("directionDetails") or {}
+    flags = [label for key, label in _DIRECTION_FLAG_LABELS.items() if dd.get(key)]
+    return {
+        "via":             dd.get("via"),
+        "short_direction": dd.get("shortDirection"),
+        "replaces_line":   dd.get("replaces"),
+        "fortifies_line":  dd.get("fortifiesLine"),
+        "service_flags":   flags,
+    }
+
+
 # ── Platform setup ─────────────────────────────────────────────────────────────
 
 async def async_setup_entry(
@@ -231,7 +264,9 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
 
     def _process(self) -> None:
         """Recompute state + attributes from the shared coordinator's departures."""
-        departures = self.coordinator.data or []
+        data          = self.coordinator.data or {}
+        departures    = data.get("departures") or []
+        next_arrival  = data.get("next_arrival")
         line_name     = self._ml.get(CONF_LINE_NAME, "")
         direction_str = self._ml.get(CONF_DIRECTION) or None
         target        = now() + self._delay
@@ -304,8 +339,28 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
         is_realtime_journey = line.get("isRealtimeJourney", False)
 
         # Line branding colours (for custom dashboard cards)
-        bg_color = line.get("backgroundColor")
-        fg_color = line.get("foregroundColor")
+        bg_color     = line.get("backgroundColor")
+        fg_color     = line.get("foregroundColor")
+        border_color = line.get("borderColor")
+        designation  = line.get("designation")          # public line number
+        sub_mode     = line.get("transportSubMode")     # e.g. regionaltrain / vasttagen
+
+        # Occupancy source: whether the crowding level is a prediction or realtime.
+        occ_source = (first.get("occupancy") or {}).get("source")
+
+        # Parsed direction details (via, service flags, replacement line, …).
+        direction_extras = _direction_extras(sj)
+
+        # Estimated arrival at the configured destination stop (from the coordinator).
+        arrival_time = None
+        arrival_in_minutes = None
+        travel_minutes = None
+        if next_arrival:
+            arrival_time = next_arrival.get("arrival_hhmm")
+            travel_minutes = next_arrival.get("duration_minutes")
+            arr_dt = parse_dt(next_arrival.get("arrival_time"))
+            if arr_dt:
+                arrival_in_minutes = max(0, int((arr_dt - now()).total_seconds() // 60))
 
         # Upcoming departures list (up to 4)
         upcoming: list[dict] = []
@@ -326,24 +381,33 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
 
         self._departure_dt = dep_dt
         self._extra = {
-            "departure_time":        dep_dt.strftime("%H:%M") if dep_dt else None,
-            "minutes_until":         max(0, int((dep_dt - now()).total_seconds() // 60)) if dep_dt else None,
-            "platform":              platform,
-            "stop_moved":            stop_moved,
-            "destination":           sj.get("direction"),
-            "transport_mode":        line.get("transportMode"),
-            "delay_minutes":         delay_min,
-            "is_realtime":           first.get("estimatedTime") is not None,
-            "is_realtime_journey":   is_realtime_journey,
-            "is_cancelled":          first.get("isCancelled", False),
-            "is_part_cancelled":     first.get("isPartCancelled", False),
-            "occupancy":             occupancy,
-            "wheelchair_accessible": wheelchair,
-            "line_color":            bg_color,
-            "line_text_color":       fg_color,
-            "details_reference":     first.get("detailsReference"),
-            "service_journey_gid":   sj.get("gid"),
-            "upcoming":              upcoming,
+            "departure_time":         dep_dt.strftime("%H:%M") if dep_dt else None,
+            "minutes_until":          max(0, int((dep_dt - now()).total_seconds() // 60)) if dep_dt else None,
+            "platform":               platform,
+            "stop_moved":             stop_moved,
+            "destination":            sj.get("direction"),
+            "designation":            designation,
+            "transport_mode":         line.get("transportMode"),
+            "transport_sub_mode":     sub_mode,
+            "delay_minutes":          delay_min,
+            "is_realtime":            first.get("estimatedTime") is not None,
+            "is_realtime_journey":    is_realtime_journey,
+            "is_cancelled":           first.get("isCancelled", False),
+            "is_part_cancelled":      first.get("isPartCancelled", False),
+            "occupancy":              occupancy,
+            "occupancy_source":       occ_source,
+            "wheelchair_accessible":  wheelchair,
+            "line_color":             bg_color,
+            "line_text_color":        fg_color,
+            "line_border_color":      border_color,
+            "details_reference":      first.get("detailsReference"),
+            "service_journey_gid":    sj.get("gid"),
+            # Estimated arrival at the configured destination stop
+            "arrival_time":           arrival_time,
+            "arrival_in_minutes":     arrival_in_minutes,
+            "travel_minutes":         travel_minutes,
+            "upcoming":               upcoming,
+            **direction_extras,
         }
 
 

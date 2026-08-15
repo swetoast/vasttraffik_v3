@@ -12,6 +12,14 @@
           "secret": "Sparas säkert och visas inte igen"
         }
       },
+      "reauth_confirm": {
+        "title": "Återanslut till Västtrafik",
+        "description": "De sparade uppgifterna avvisades. Ange en giltig API-nyckel och hemlighet för att återansluta.",
+        "data": {
+          "key": "API-nyckel",
+          "secret": "API-hemlighet"
+        }
+      },
       "start_stop": {
         "title": "Var går du på?",
         "description": "Ange namnet på hållplatsen där du går på. Om flera träffar hittas får du välja rätt hållplats i en lista.\n\nExempel: {example}",
@@ -83,7 +91,14 @@
       "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen."
     },
     "abort": {
-      "already_configured": "Detta Västtrafik-konto är redan konfigurerat. Använd alternativknappen för att lägga till fler linjer."
+      "already_configured": "Detta Västtrafik-konto är redan konfigurerat. Använd alternativknappen för att lägga till fler linjer.",
+      "reauth_successful": "Västtrafik återanslöts."
+    }
+  },
+  "issues": {
+    "storning_unavailable": {
+      "title": "Västtrafik störningsdata otillgänglig",
+      "description": "Störnings-API:et returnerade ett åtkomstfel. Detta är en separat prenumeration på developer.vasttrafik.se — ge TrafficSituations-API:et åtkomst till din applikation för att aktivera störningssensorerna. Fram till dess är de avstängda."
     }
   },
   "options": {

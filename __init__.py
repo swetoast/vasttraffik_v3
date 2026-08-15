@@ -1,6 +1,7 @@
 """Initialize the Västtrafik v3 integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -34,13 +35,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # One shared departures coordinator per monitored line. Both the departure
     # sensor and the vehicle tracker for that line read from it, so departures are
     # fetched once per interval instead of once per entity.
-    coordinators: list[VasttrafikDepartureCoordinator] = []
-    for idx, ml in enumerate(entry.data.get(CONF_MONITORED_LINES, [])):
-        coordinator = VasttrafikDepartureCoordinator(hass, adapter, ml, idx)
-        # Non-raising first refresh: a temporarily-unreachable stop leaves that
-        # line's entities unavailable rather than blocking the whole integration.
-        await coordinator.async_refresh()
-        coordinators.append(coordinator)
+    coordinators: list[VasttrafikDepartureCoordinator] = [
+        VasttrafikDepartureCoordinator(hass, adapter, ml, idx)
+        for idx, ml in enumerate(entry.data.get(CONF_MONITORED_LINES, []))
+    ]
+    # Refresh all lines in parallel at startup (non-raising: a temporarily
+    # unreachable stop leaves that line's entities unavailable rather than
+    # blocking the whole integration).
+    if coordinators:
+        await asyncio.gather(*(c.async_refresh() for c in coordinators))
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "api": adapter,

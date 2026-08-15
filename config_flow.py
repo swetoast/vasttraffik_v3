@@ -189,6 +189,7 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._language: str = DEFAULT_LANGUAGE
         self._adapter:  VtjpAdapter | None = None
         self._monitored: list[dict] = []
+        self._reauth_entry: config_entries.ConfigEntry | None = None
 
         # Per-iteration transient state — reset by _reset()
         self._start_name: str = ""
@@ -274,6 +275,57 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         options=lang_options,
                         mode=SelectSelectorMode.DROPDOWN,
                     )
+                ),
+            }),
+            errors=errors,
+        )
+
+    # ── Reauth ────────────────────────────────────────────────────────────────
+
+    async def async_step_reauth(self, entry_data: dict) -> dict:
+        """Triggered by HA when the API rejects the stored credentials."""
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        if self._reauth_entry:
+            self._language = self._reauth_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict | None = None) -> dict:
+        errors: dict = {}
+        if user_input is not None and self._reauth_entry is not None:
+            key    = (user_input.get(CONF_KEY)    or "").strip()
+            secret = (user_input.get(CONF_SECRET) or "").strip()
+            if not key or not secret:
+                errors["base"] = "auth"
+            else:
+                try:
+                    adapter = VtjpAdapter(key, secret, language=self._language)
+                    await self.hass.async_add_executor_job(adapter.ensure_token)
+                except ConfigEntryAuthFailed:
+                    errors["base"] = "auth"
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.error("Reauth credential check failed: %s", exc, exc_info=True)
+                    errors["base"] = "cannot_connect"
+
+                if not errors:
+                    self.hass.config_entries.async_update_entry(
+                        self._reauth_entry,
+                        data={**self._reauth_entry.data, CONF_KEY: key, CONF_SECRET: secret},
+                    )
+                    await self.hass.config_entries.async_reload(
+                        self._reauth_entry.entry_id
+                    )
+                    return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({
+                vol.Required(CONF_KEY): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
+                vol.Required(CONF_SECRET): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
             }),
             errors=errors,

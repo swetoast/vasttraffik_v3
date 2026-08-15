@@ -43,6 +43,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import VtjpAdapter
@@ -207,6 +208,18 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
             return
 
         self._disruptions = [_normalise(sit) for sit in raw]
+
+        # If the Störning API is not part of this app's subscription, surface a
+        # one-time repair issue in the HA UI instead of only a log line.
+        if self._api.disruptions_unavailable:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "storning_unavailable",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="storning_unavailable",
+            )
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

@@ -35,6 +35,11 @@ class VtjpAdapter:
         # Set True on first 403/404 so we stop logging every poll
         self._störning_unavailable: bool = False
 
+    @property
+    def disruptions_unavailable(self) -> bool:
+        """True once the Störning API has returned 403/404 (no subscription)."""
+        return self._störning_unavailable
+
     # ── Auth ──────────────────────────────────────────────────────────────────
 
     def ensure_token(self) -> None:
@@ -66,6 +71,14 @@ class VtjpAdapter:
     def _get(self, path: str, params: dict | None = None, base: str = BASE_URL) -> Any:
         self.ensure_token()
         resp = self._session.get(f"{base}{path}", params=params, timeout=15)
+        # Token may have been revoked/expired earlier than its stated lifetime.
+        # Force a single refresh + retry on 401 so transient auth blips self-heal.
+        if resp.status_code == 401:
+            _LOGGER.debug("401 from %s%s — forcing token refresh and retrying once", base, path)
+            self._token = None
+            self._token_expiry = 0.0
+            self.ensure_token()
+            resp = self._session.get(f"{base}{path}", params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
