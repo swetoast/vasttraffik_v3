@@ -9,11 +9,14 @@ Monitor selected Västtrafik lines directly in Home Assistant with upcoming depa
 - UI setup through Home Assistant config flow
 - Monitor one or more lines from selected stops
 - Optional destination / direction filtering
-- Realtime departure sensor with delay and platform data
+- Realtime departure sensor with delay, platform, occupancy and line branding
+- Estimated arrival time at your destination stop
 - Disruption binary sensor for affected traffic
 - Vehicle tracker for available position data
 - Ticket price sensor for configured journeys
 - Swedish and English API response language support
+- Credential reconnect (reauth) flow and downloadable diagnostics
+- Shared per-line data fetching, so entities don't duplicate API calls
 
 ## Requirements
 
@@ -47,6 +50,7 @@ custom_components/vasttrafik_v3/
 ├── const.py
 ├── coordinator.py
 ├── device_tracker.py
+├── diagnostics.py
 ├── manifest.json
 ├── options.py
 ├── sensor.py
@@ -96,17 +100,33 @@ Common attributes:
 - `delay_minutes`
 - `platform`
 - `stop_moved`
+- `designation` — the public line number
 - `transport_mode`
+- `transport_sub_mode` — e.g. `regionaltrain`, `vasttagen`
 - `occupancy`
+- `occupancy_source` — `prediction` or `realtime`
 - `wheelchair_accessible`
 - `is_realtime`
 - `is_realtime_journey`
 - `is_cancelled`
 - `is_part_cancelled`
-- `line_color` / `line_text_color`
+- `line_color` / `line_text_color` / `line_border_color`
 - `service_journey_gid`
 - `details_reference`
 - `upcoming` — a list of the next few departures
+
+When a destination stop is configured:
+
+- `arrival_time` — estimated arrival at your destination (HH:MM)
+- `arrival_in_minutes`
+- `travel_minutes` — estimated ride time from boarding to destination
+
+Parsed direction details (from the API's direction string):
+
+- `via` — the "via X" part of the direction, when present
+- `short_direction`
+- `replaces_line` / `fortifies_line`
+- `service_flags` — a list of active flags such as `extra_bus`, `express_bus`, `school_bus`, `front_entry`, `direct_bus`
 
 ### Disruption binary sensor
 
@@ -134,6 +154,7 @@ Common attributes:
 - `progress_percent`
 - `details_reference`
 - `position_source` — `realtime_gps` or `path_interpolation`
+- `notes` — realtime journey messages, when available (realtime GPS only)
 
 ### Ticket sensor
 
@@ -147,11 +168,20 @@ Use the integration options to:
 - Remove monitored lines
 - Change the API response language
 
+## Reconnecting credentials
+
+If the API rejects the stored key and secret (for example after they are rotated on the developer portal), Home Assistant prompts you to reconnect through a **Reconnect to Västtrafik** dialog — no need to delete and re-add the integration. Enter a valid key and secret and the entry reloads in place.
+
+## Diagnostics
+
+The integration supports Home Assistant's built-in diagnostics. Open the device or config entry and choose **Download diagnostics** for a credential-redacted snapshot (per-line update state, departure counts, next-arrival data, and whether the disruption API is available). This is the easiest thing to attach when reporting an issue.
+
 ## Troubleshooting
 
-- **No disruption data / disruption sensor unavailable.** The disruption (Störning) data uses a separate Västtrafik API. If your developer application isn't granted access to it, the API returns 403/404 and the disruption sensors stay unavailable — the integration logs a single warning and stops retrying. Grant the Störning API to your application on the developer portal.
+- **No disruption data / disruption sensor unavailable.** The disruption (Störning) data uses a separate Västtrafik API. If your developer application isn't granted access to it, the API returns 403/404 and the disruption sensors stay unavailable. The integration raises a **repair issue** in Home Assistant (Settings → System → Repairs) explaining this. Grant the TrafficSituations API to your application on the developer portal to enable it.
 - **Vehicle tracker or ticket sensor stays empty.** The positions and ticket endpoints may not be part of every subscription. When they return no data, the tracker falls back to interpolation (or reports no active service) and the ticket sensor stays empty, without erroring.
-- **Authentication failed during setup.** Re-check the API key and secret, and that the application is active on the developer portal.
+- **Destination arrival time is missing.** `arrival_time` / `travel_minutes` only appear when a destination stop is configured for that line.
+- **Authentication failed.** Re-check the API key and secret and that the application is active on the developer portal. If they changed, use the reconnect dialog (above).
 - **"Already configured".** Only one entry per API account is allowed — add more lines through the existing entry's options instead.
 - **Enable debug logging** to see the exact API calls and responses:
 
