@@ -15,7 +15,7 @@ from homeassistant.util.dt import now
 
 from .api import VtjpAdapter
 from .coordinator import VasttrafikDepartureCoordinator
-from ._helpers import parse_dt, to_float  # noqa: F401 (to_float re-exported for device_tracker)
+from ._helpers import parse_dt, short_direction, to_float  # noqa: F401 (to_float re-exported for device_tracker)
 from .const import (
     CONF_DELAY,
     CONF_DIRECTION,
@@ -231,8 +231,8 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
                 if (line.get("shortName") or "") != line_name:
                     continue
                 if require_direction and dir_lower:
-                    d = (sj.get("direction") or "").lower()
-                    if d and dir_lower not in d:
+                    d = sj.get("direction") or ""
+                    if d and short_direction(dir_lower) != short_direction(d):
                         continue
                 t = _best_departure_dt(dep)
                 if t is None or t < target:

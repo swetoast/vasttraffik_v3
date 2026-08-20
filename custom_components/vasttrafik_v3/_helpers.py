@@ -5,11 +5,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+def short_direction(value: str | None) -> str:
+    """Reduce a headsign to its terminus token for tolerant direction matching:
+    'Brämhult via Resecentrum, Påstigning fram' → 'brämhult'. The suffixes
+    (', Påstigning fram', ' via …') vary per trip on the same travel direction."""
+    s = (value or "").lower().strip()
+    s = s.split(",")[0]
+    s = s.split(" via ")[0]
+    return s.strip()
+
+
 def parse_dt(value: str | None) -> datetime | None:
-    """
-    Parse an ISO-8601 string into a timezone-aware datetime.
-    Returns None on any parse failure.
-    """
+    """Parse an ISO-8601 string into a tz-aware datetime; None on failure."""
     if not value:
         return None
     try:

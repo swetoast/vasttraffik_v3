@@ -20,7 +20,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util.dt import now as ha_now
 
 from .api import VtjpAdapter
-from ._helpers import parse_dt, to_float
+from ._helpers import parse_dt, short_direction, to_float
 from .const import (
     CONF_DELAY,
     CONF_DIRECTION,
@@ -366,8 +366,8 @@ def _find_departure(
             continue
 
         if dir_lower:
-            dep_direction = (sj.get("direction") or "").lower()
-            if dep_direction and dir_lower not in dep_direction:
+            dep_direction = sj.get("direction") or ""
+            if dep_direction and short_direction(dir_lower) != short_direction(dep_direction):
                 continue
 
         ref = dep.get("detailsReference") or ""

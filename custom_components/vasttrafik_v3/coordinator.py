@@ -15,12 +15,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import now as ha_now
 
-from ._helpers import parse_dt
+from ._helpers import parse_dt, short_direction
 from .api import VtjpAdapter
 from .const import (
     CONF_DELAY,
     CONF_DIRECTION,
-    CONF_DIRECTION_GID,
     CONF_END_STOP_GID,
     CONF_LINE_NAME,
     CONF_STOP_GID,
@@ -68,7 +67,6 @@ class VasttrafikDepartureCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict:
         stop_gid = self._ml[CONF_STOP_GID]
-        direction_gid = self._ml.get(CONF_DIRECTION_GID) or None
 
         # Window: (now − delay − lookback) .. (now + delay + horizon).
         fetch_from = ha_now() - self._delay - LOOKBACK
@@ -76,12 +74,15 @@ class VasttrafikDepartureCoordinator(DataUpdateCoordinator):
             (2 * self._delay + LOOKBACK + FUTURE_HORIZON).total_seconds() // 60
         )
 
+        # No server-side directionGid: it pins to one terminus, so a line with
+        # several destination variants in one travel direction (line 5:
+        # Brämhult / Duvgatan / Sjöhagsvägen) loses most of its trips. Direction
+        # is filtered client-side instead, which can fall back to any trip.
         def _fetch() -> list[dict]:
             return self._api.get_departures(
                 stop_gid,
                 when=fetch_from,
-                direction_gid=direction_gid,
-                limit=30,
+                limit=50,
                 time_span_minutes=span_minutes,
             )
 
@@ -117,8 +118,8 @@ class VasttrafikDepartureCoordinator(DataUpdateCoordinator):
                 if (line.get("shortName") or "") != line_name:
                     continue
                 if require_direction and direction:
-                    d = (sj.get("direction") or "").lower()
-                    if d and direction not in d:
+                    d = sj.get("direction") or ""
+                    if d and short_direction(direction) != short_direction(d):
                         continue
                 t = _best_departure_dt(dep)
                 if t is None or t < target:
