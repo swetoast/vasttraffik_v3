@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -222,11 +221,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except ConfigEntryAuthFailed:
                     _LOGGER.warning("Västtrafik config flow: auth failed")
                     errors["base"] = "auth"
-                except Exception as exc:
-                    _LOGGER.error(
-                        "Västtrafik config flow: credential check failed: %s",
-                        exc, exc_info=True,
-                    )
+                except Exception:
+                    _LOGGER.exception("Västtrafik config flow: credential check failed")
                     errors["base"] = "cannot_connect"
 
             if not errors:
@@ -306,8 +302,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await self.hass.async_add_executor_job(adapter.ensure_token)
                 except ConfigEntryAuthFailed:
                     errors["base"] = "auth"
-                except Exception as exc:  # noqa: BLE001
-                    _LOGGER.error("Reauth credential check failed: %s", exc, exc_info=True)
+                except Exception:
+                    _LOGGER.exception("Reauth credential check failed")
                     errors["base"] = "cannot_connect"
 
                 if not errors:
@@ -357,10 +353,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.debug(
                         "Start stop lookup %r → %d result(s)", name, len(results)
                     )
-                except Exception as exc:
-                    _LOGGER.error(
-                        "Start stop lookup error for %r: %s", name, exc, exc_info=True
-                    )
+                except Exception:
+                    _LOGGER.exception("Start stop lookup error for %r", name)
                     errors["base"] = "cannot_connect"
                     results = []
 
@@ -403,10 +397,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.debug(
                         "End stop lookup %r → %d result(s)", name, len(results)
                     )
-                except Exception as exc:
-                    _LOGGER.error(
-                        "End stop lookup error for %r: %s", name, exc, exc_info=True
-                    )
+                except Exception:
+                    _LOGGER.exception("End stop lookup error for %r", name)
                     errors["base"] = "cannot_connect"
                     results = []
 
@@ -498,10 +490,10 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "Fetched %d departures from %s (%s)",
                 len(self._live_departures), self._start_name, self._start_gid,
             )
-        except Exception as exc:
-            _LOGGER.error(
-                "Departure fetch failed for %s (%s): %s",
-                self._start_name, self._start_gid, exc, exc_info=True,
+        except Exception:
+            _LOGGER.exception(
+                "Departure fetch failed for %s (%s)",
+                self._start_name, self._start_gid
             )
             self._live_departures = []
 
@@ -526,7 +518,7 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 else:
                     self._available_lines = all_lines
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "Journey plan failed (%s→%s): %s — showing all lines",
                     self._start_name, self._end_name, exc,
@@ -584,10 +576,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             short, self._direction
                         )
 
-                except Exception as exc:
-                    _LOGGER.error(
-                        "pick_line processing failed for %r: %s", short, exc, exc_info=True
-                    )
+                except Exception:
+                    _LOGGER.exception("pick_line processing failed for %r", short)
                     errors["base"] = "unknown"
 
             if not errors:
@@ -681,10 +671,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 self._monitored.append(entry)
                 _LOGGER.debug("Appended monitored entry: %s", entry)
-            except Exception as exc:
-                _LOGGER.error(
-                    "line_options save failed: %s", exc, exc_info=True
-                )
+            except Exception:
+                _LOGGER.exception("line_options save failed")
                 return self.async_show_form(
                     step_id="line_options",
                     data_schema=self._line_options_schema(default_name),

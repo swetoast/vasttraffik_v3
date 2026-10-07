@@ -77,7 +77,6 @@ custom_components/vasttrafik_v3/
 ├── sensor.py
 ├── services.py
 ├── services.yaml
-├── strings.json
 ├── translations/
 │   ├── en.json
 │   └── sv.json

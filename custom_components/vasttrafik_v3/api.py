@@ -1,8 +1,8 @@
 """Adapter for the Västtrafik REST APIs.
 
-Planera Resa v4 and Störning v1 carry the integration. Geografi v3 and
-Pendelparkering (SPP) v3 are optional extras: an application that is not
-subscribed to them simply gets no data from those calls.
+Planera Resa v4 carries the integration. Störning v1, Geografi v3 and
+Pendelparkering (SPP) v3 are extras: an application that is not subscribed
+to one simply gets no data from its calls.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
-
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from ._helpers import journey_line_directions
@@ -145,7 +144,11 @@ class VtjpAdapter:
         return resp
 
     def optional_api_available(self, api: str) -> bool:
-        return api not in self.disabled_apis and time.monotonic() >= self._optional_blocked.get(api, 0.0)
+        if api in self.disabled_apis:
+            return False
+        if api == "Störning":
+            return not self._störning_unavailable
+        return time.monotonic() >= self._optional_blocked.get(api, 0.0)
 
     def probe_optional_apis(self) -> dict[str, bool | None]:
         """Whether this application may use each API beyond Planera Resa:
@@ -205,21 +208,6 @@ class VtjpAdapter:
         stops = [s for s in self._list(data, "results") if s.get("gid") and s.get("name")]
         return sorted(stops, key=lambda s: s.get("straightLineDistanceInMeters") or 0)
 
-    # ── Stop areas ─────────────────────────────────────────────────────────────
-
-    def get_stop_area(self, gid: str) -> dict:
-        """Unused. WARNING: /stop-areas has no filter — it returns the whole
-        registry; scan/cache once if ever needed. Coordinate fields are lat/long."""
-        data = self._get("/stop-areas")
-        if isinstance(data, list):
-            match = next((s for s in data if s.get("gid") == gid), {})
-            if match and "lat" in match and "latitude" not in match:
-                match = dict(match)
-                match["latitude"] = match["lat"]
-                match["longitude"] = match.get("long")
-            return match
-        return {}
-
     # ── Departures ─────────────────────────────────────────────────────────────
 
     def get_departures(
@@ -227,7 +215,6 @@ class VtjpAdapter:
         stop_gid: str,
         *,
         when: Any = None,
-        direction_gid: str | None = None,
         limit: int = 20,
         time_span_minutes: int | None = None,
         max_per_line_and_direction: int | None = None,
@@ -236,8 +223,6 @@ class VtjpAdapter:
         params: dict[str, Any] = {"limit": limit, "includeOccupancy": "true"}
         if when is not None:
             params["startDateTime"] = when.isoformat()
-        if direction_gid:
-            params["directionGid"] = direction_gid
         if time_span_minutes is not None:
             params["timeSpanInMinutes"] = max(0, min(1440, int(time_span_minutes)))
         if max_per_line_and_direction is not None:
@@ -571,24 +556,3 @@ class VtjpAdapter:
 
     def get_traffic_situations_for_stoparea(self, stop_area_gid: str) -> list[dict]:
         return self._störning_get(f"/traffic-situations/stoparea/{quote(stop_area_gid, safe='')}")
-
-    def get_traffic_situations_for_stoppoint(self, stop_point_gid: str) -> list[dict]:
-        return self._störning_get(f"/traffic-situations/stoppoint/{quote(stop_point_gid, safe='')}")
-
-    def get_traffic_situations_for_journey(self, journey_gid: str) -> list[dict]:
-        return self._störning_get(f"/traffic-situations/journey/{quote(journey_gid, safe='')}")
-
-    def get_all_traffic_situations(self) -> list[dict]:
-        return self._störning_get("/traffic-situations")
-
-    def get_traffic_situations(
-        self,
-        line_gid: str | None = None,
-        stop_gid: str | None = None,
-    ) -> list[dict]:
-        """Route to the most specific traffic-situations endpoint available."""
-        if line_gid:
-            return self.get_traffic_situations_for_line(line_gid)
-        if stop_gid:
-            return self.get_traffic_situations_for_stoparea(stop_gid)
-        return self.get_all_traffic_situations()

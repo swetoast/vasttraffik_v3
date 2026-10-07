@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
@@ -243,8 +242,8 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             await self.hass.async_add_executor_job(a.ensure_token)
             self._adapter = a
             return True
-        except Exception as exc:
-            _LOGGER.error("Options: adapter init failed: %s", exc, exc_info=True)
+        except Exception:
+            _LOGGER.exception("Options: adapter init failed")
             return False
 
     async def _resolve_direction_gid(self, line_name: str, direction_str: str) -> str:
@@ -277,7 +276,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_remove()
             if action == "apis":
                 return await self.async_step_apis()
-            if action == "home":
+            if action in ("home_on", "home_off"):
                 self._use_home = not self._use_home
                 self._nearby = None
                 return await self.async_step_menu()
@@ -285,31 +284,36 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_language()
             return self._save()
 
+        # Labels are the English fallback; the frontend takes the translated
+        # ones from selector.menu_action in the translation files.
         options = [{"value": "add", "label": "Add a monitored line"}]
         if self._monitored:
             options.append({"value": "edit", "label": "Change walk time or name of a line"})
             options.append({"value": "remove", "label": "Remove a monitored line"})
-        lang_label = SUPPORTED_LANGUAGES.get(self._language, self._language)
-        options.append({"value": "language", "label": f"Language: {lang_label}"})
-        options.append({
-            "value": "home",
-            "label": "Use home location for suggestions and door-to-door trips: "
-                     + ("on (select to turn off)" if self._use_home else "off (select to turn on)"),
-        })
-        used = [name for key, name in API_SWITCHES.items() if self._apis[key]]
-        options.append({
-            "value": "apis",
-            "label": "Extra Västtrafik APIs in use: " + (", ".join(used) or "none"),
-        })
+        options.append({"value": "language", "label": "Change language"})
+        if self._use_home:
+            options.append({"value": "home_off", "label": "Stop using my home location"})
+        else:
+            options.append({"value": "home_on", "label": "Use my home location"})
+        options.append({"value": "apis", "label": "Choose extra Västtrafik APIs"})
         options.append({"value": "save", "label": "Save and close"})
 
+        used = [name for key, name in API_SWITCHES.items() if self._apis[key]]
         return self.async_show_form(
             step_id="menu",
             data_schema=vol.Schema({
                 vol.Required("action"): SelectSelector(
-                    SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST)
+                    SelectSelectorConfig(
+                        options=options,
+                        mode=SelectSelectorMode.LIST,
+                        translation_key="menu_action",
+                    )
                 ),
             }),
+            description_placeholders={
+                "language": SUPPORTED_LANGUAGES.get(self._language, self._language),
+                "apis": ", ".join(used) or "–",
+            },
         )
 
     async def async_step_language(self, user_input: dict | None = None) -> dict:
@@ -380,8 +384,8 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                         self._adapter.lookup_station, name  # type: ignore[union-attr]
                     )
                     _LOGGER.debug("Options start stop %r → %d", name, len(results))
-                except Exception as exc:
-                    _LOGGER.error("Options start stop lookup error: %s", exc, exc_info=True)
+                except Exception:
+                    _LOGGER.exception("Options start stop lookup error")
                     results = []
                     errors["base"] = "cannot_connect"
 
@@ -423,8 +427,8 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                         results = await self.hass.async_add_executor_job(
                             self._adapter.lookup_station, name  # type: ignore[union-attr]
                         )
-                    except Exception as exc:
-                        _LOGGER.error("Options end stop lookup error: %s", exc, exc_info=True)
+                    except Exception:
+                        _LOGGER.exception("Options end stop lookup error")
                         results = []
                         errors["base"] = "cannot_connect"
 
@@ -501,10 +505,8 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
 
         try:
             self._live_departures = await self.hass.async_add_executor_job(_do_fetch)
-        except Exception as exc:
-            _LOGGER.error(
-                "Options: departure fetch failed for %s: %s", self._start_name, exc, exc_info=True
-            )
+        except Exception:
+            _LOGGER.exception("Options: departure fetch failed for %s", self._start_name)
             self._live_departures = []
 
         if self._end_gid and self._live_departures:
@@ -519,7 +521,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 all_lines = _lines_from_departures(self._live_departures)
                 filtered  = [l for l in all_lines if l["short_name"] in journey_lines]
                 self._available_lines = filtered if filtered else all_lines
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning("Options journey plan failed: %s", exc)
                 self._available_lines = _lines_from_departures(self._live_departures)
         else:

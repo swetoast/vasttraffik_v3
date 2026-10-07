@@ -9,7 +9,11 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import (
     config_validation as cv,
+)
+from homeassistant.helpers import (
     device_registry as dr,
+)
+from homeassistant.helpers import (
     entity_registry as er,
 )
 from homeassistant.helpers.typing import ConfigType
@@ -34,12 +38,12 @@ from .const import (
     DEFAULT_LANGUAGE,
     DOMAIN,
 )
-from .services import async_register_services
 from .coordinator import (
     VasttrafikDepartureCoordinator,
     VasttrafikParkingCoordinator,
     VasttrafikRouteCoordinator,
 )
+from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[str] = ["sensor", "binary_sensor", "device_tracker", "event"]

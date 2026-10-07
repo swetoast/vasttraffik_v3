@@ -8,8 +8,12 @@ from datetime import datetime
 from typing import Any
 
 import voluptuous as vol
-
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
@@ -59,7 +63,7 @@ def _adapter(hass: HomeAssistant, call: ServiceCall) -> VtjpAdapter:
 async def _call(hass: HomeAssistant, func: Any, *args: Any, **kwargs: Any) -> Any:
     try:
         return await hass.async_add_executor_job(lambda: func(*args, **kwargs))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HomeAssistantError(f"Västtrafik request failed: {exc}") from exc
 
 

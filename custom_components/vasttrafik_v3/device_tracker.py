@@ -19,7 +19,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util.dt import now as ha_now
 
-from ._helpers import best_departure_dt, boarding_index, hhmm, line_key, parse_dt, to_float
+from ._helpers import (
+    best_departure_dt,
+    boarding_index,
+    hhmm,
+    line_key,
+    parse_dt,
+    to_float,
+)
 from .api import VtjpAdapter
 from .const import (
     CONF_LINE_NAME,
@@ -67,7 +74,7 @@ async def async_setup_entry(
             try:
                 await tracker.async_update(positions)
                 tracker.async_write_ha_state()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Vehicle tracker update failed for %s", tracker.entity_id)
 
     entry.async_on_unload(

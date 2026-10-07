@@ -38,6 +38,12 @@ the lines already monitored. Planera Resa is the only API that is required.
   and tariff zones on the ticket sensor (the last two need Geografi).
 
 ### Changed
+- The options menu is translated (it was English only) and shows the current language and
+  the extra APIs in use.
+- Housekeeping without behaviour change: unused API methods and constants removed, import
+  order and logging calls tidied, and the duplicate `strings.json` dropped (the
+  `translations` folder is what Home Assistant reads). Diagnostics now also report whether
+  Störning is available.
 - **Direction is decided by the destination stop, not the headsign.** A trip counts when it
   actually calls at your destination after your boarding stop. This is learned once per
   headsign and platform. A stored direction that points the wrong way is corrected by itself.

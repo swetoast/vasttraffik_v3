@@ -57,6 +57,6 @@ async def async_get_config_entry_diagnostics(
         "api_switches": store.get("switches") or {},
         "optional_apis": {
             name: bool(api and api.optional_api_available(name))
-            for name in ("Geografi", "Pendelparkering")
+            for name in ("Störning", "Geografi", "Pendelparkering")
         },
     }

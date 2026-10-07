@@ -131,7 +131,7 @@ class VasttrafikDepartureCoordinator(DataUpdateCoordinator[dict]):
             departures = await self.hass.async_add_executor_job(_fetch)
         except ConfigEntryAuthFailed:
             raise  # lets Home Assistant start the reauth flow
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise UpdateFailed(f"Departure fetch failed: {exc}") from exc
 
         line_name = self.ml.get(CONF_LINE_NAME, "")
@@ -380,9 +380,6 @@ class VasttrafikDepartureCoordinator(DataUpdateCoordinator[dict]):
 
     # ── Journey details ────────────────────────────────────────────────────────
 
-    def cached_journey(self, dep: dict) -> tuple[list[dict], list[dict]] | None:
-        return self._journeys.get(dep.get("detailsReference") or "")
-
     async def async_journey(
         self, dep: dict, *, refresh: bool = False
     ) -> tuple[list[dict], list[dict]] | None:
@@ -525,7 +522,7 @@ class VasttrafikRouteCoordinator(DataUpdateCoordinator[list[dict]]):
                 )
         except ConfigEntryAuthFailed:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise UpdateFailed(f"Journey search failed: {exc}") from exc
 
         access = [j["access"]["minutes"] for j in journeys if j["access"] and j["access"]["minutes"]]
@@ -570,7 +567,7 @@ class VasttrafikRouteCoordinator(DataUpdateCoordinator[list[dict]]):
 
         try:
             plan = await self.hass.async_add_executor_job(_fetch)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not (from_home or to_home):
                 raise
             response = getattr(exc, "response", None)
@@ -650,7 +647,7 @@ class VasttrafikParkingCoordinator(DataUpdateCoordinator[dict[int, dict]]):
             return await self.hass.async_add_executor_job(self._fetch)
         except ConfigEntryAuthFailed:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise UpdateFailed(f"Parking fetch failed: {exc}") from exc
 
     def _fetch(self) -> dict[int, dict]:

@@ -610,7 +610,7 @@ class VasttrafikTicketSensor(SensorEntity):
 
         try:
             tickets = await self.hass.async_add_executor_job(_fetch)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("Ticket fetch failed for %s: %s", self._attr_unique_id, exc)
             return
 

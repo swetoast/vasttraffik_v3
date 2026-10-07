@@ -20,7 +20,6 @@ from homeassistant.util.dt import now as ha_now
 
 from ._helpers import dir_key_for_line, parse_dt
 from .api import VtjpAdapter
-from .coordinator import VasttrafikDepartureCoordinator
 from .const import (
     CONF_LINE_GID,
     CONF_LINE_NAME,
@@ -32,6 +31,7 @@ from .const import (
     DOMAIN,
     SEVERITY_ORDER,
 )
+from .coordinator import VasttrafikDepartureCoordinator
 from .sensor import device_info_for_line
 
 _LOGGER = logging.getLogger(__name__)

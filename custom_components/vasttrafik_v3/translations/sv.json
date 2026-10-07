@@ -119,7 +119,8 @@
         "title": "Hantera bevakade linjer",
         "data": {
           "action": "Åtgärd"
-        }
+        },
+        "description": "Språk: {language}\nFler API:er från Västtrafik som används: {apis}"
       },
       "start_stop": {
         "title": "Var går du på?",
@@ -348,6 +349,20 @@
           "name": "Radie",
           "description": "Hur långt från mittpunkten som söks."
         }
+      }
+    }
+  },
+  "selector": {
+    "menu_action": {
+      "options": {
+        "add": "Lägg till en bevakad linje",
+        "edit": "Ändra gångtid eller namn på en linje",
+        "remove": "Ta bort en bevakad linje",
+        "language": "Byt språk",
+        "home_on": "Använd min hemposition för närliggande hållplatser och resor från dörr till dörr",
+        "home_off": "Sluta använda min hemposition",
+        "apis": "Välj fler API:er från Västtrafik",
+        "save": "Spara och stäng"
       }
     }
   }

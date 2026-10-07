@@ -119,7 +119,8 @@
         "title": "Manage monitored lines",
         "data": {
           "action": "Action"
-        }
+        },
+        "description": "Language: {language}\nExtra Västtrafik APIs in use: {apis}"
       },
       "start_stop": {
         "title": "Where do you board?",
@@ -348,6 +349,20 @@
           "name": "Radius",
           "description": "How far from the centre to look."
         }
+      }
+    }
+  },
+  "selector": {
+    "menu_action": {
+      "options": {
+        "add": "Add a monitored line",
+        "edit": "Change walk time or name of a line",
+        "remove": "Remove a monitored line",
+        "language": "Change language",
+        "home_on": "Use my home location for nearby stops and door-to-door trips",
+        "home_off": "Stop using my home location",
+        "apis": "Choose extra Västtrafik APIs",
+        "save": "Save and close"
       }
     }
   }
