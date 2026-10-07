@@ -1,0 +1,97 @@
+search_journey:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: vasttrafik_v3
+    origin:
+      required: true
+      example: "Brunnsparken, Göteborg"
+      selector:
+        text:
+    destination:
+      required: true
+      example: "Korsvägen, Göteborg"
+      selector:
+        text:
+    via:
+      example: "Centralstationen, Göteborg"
+      selector:
+        text:
+    time:
+      selector:
+        datetime:
+    arrive_by:
+      default: false
+      selector:
+        boolean:
+    only_direct:
+      default: false
+      selector:
+        boolean:
+    transport_modes:
+      selector:
+        select:
+          multiple: true
+          options: [tram, bus, ferry, train, taxi]
+    limit:
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 10
+stop_board:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: vasttrafik_v3
+    stop:
+      required: true
+      example: "Brunnsparken, Göteborg"
+      selector:
+        text:
+    board:
+      default: departures
+      selector:
+        select:
+          options: [departures, arrivals]
+    minutes:
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+    line:
+      example: "5"
+      selector:
+        text:
+    limit:
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+line_vehicles:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: vasttrafik_v3
+    line:
+      required: true
+      example: "5"
+      selector:
+        text:
+    stop:
+      example: "Brunnsparken, Göteborg"
+      selector:
+        text:
+    radius_km:
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 50
+          unit_of_measurement: km

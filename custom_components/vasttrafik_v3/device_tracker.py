@@ -1,14 +1,14 @@
-"""Device tracker — live vehicle position for each monitored line.
+"""Device tracker — where the bus you are going to catch is right now.
 
-Tier 1: /positions filtered by the matched departure's detailsReference (live
-GPS). Tier 2 fallback: interpolate along the journey's GPS path using stop
-call times.
+Follows the departure the line's sensor points at. Tier 1: /positions filtered
+by that trip's detailsReference. Tier 2 fallback: interpolate along the trip's
+path using its stop call times.
 """
 from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType
@@ -19,26 +19,26 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util.dt import now as ha_now
 
+from ._helpers import best_departure_dt, boarding_index, hhmm, line_key, parse_dt, to_float
 from .api import VtjpAdapter
-from ._helpers import parse_dt, short_direction, to_float
 from .const import (
-    CONF_DELAY,
-    CONF_DIRECTION,
-    CONF_DIRECTION_GID,
     CONF_LINE_NAME,
     CONF_MONITORED_LINES,
     CONF_STOP_GID,
-    CONF_STOP_NAME,
     CONF_TRANSPORT_MODE,
-    DEFAULT_DELAY,
     DOMAIN,
     VEHICLE_SCAN_INTERVAL,
 )
-from .sensor import _MODE_ICON, device_info_for_line, dir_key_for_line
+from .coordinator import VasttrafikDepartureCoordinator
+from .sensor import device_info_for_line
 
 _LOGGER     = logging.getLogger(__name__)
-_LOOKBACK   = timedelta(minutes=10)
 _BBOX_DEG   = 0.15   # bbox half-width around the start stop, in degrees
+_POSITIONS_BACKOFF = timedelta(minutes=10)  # pause /positions after an error
+_MODE_ICON  = {
+    "bus": "mdi:bus", "tram": "mdi:tram", "train": "mdi:train",
+    "ferry": "mdi:ferry", "taxi": "mdi:taxi",
+}
 
 
 async def async_setup_entry(
@@ -51,19 +51,21 @@ async def async_setup_entry(
     coordinators = store["coordinators"]
 
     entities = [
-        VasttrafikVehicleTracker(hass, api, coordinators[i], ml, entry.entry_id, i)
+        VasttrafikVehicleTracker(hass, api, coordinators[i], ml, entry.entry_id)
         for i, ml in enumerate(store["config"].get(CONF_MONITORED_LINES, []))
     ]
     if not entities:
         return
 
     async_add_entities(entities, update_before_add=True)
+    shared = _SharedPositions(hass, api)
 
     async def _tick(_dt: Any = None) -> None:
+        positions = await shared.fetch(entities)
         for tracker in entities:
             # One tracker's failure must not stop the others updating this tick.
             try:
-                await tracker.async_update()
+                await tracker.async_update(positions)
                 tracker.async_write_ha_state()
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Vehicle tracker update failed for %s", tracker.entity_id)
@@ -73,180 +75,174 @@ async def async_setup_entry(
     )
 
 
-class VasttrafikVehicleTracker(TrackerEntity):
-    """Live vehicle position tracker, pinned to the exact configured line + direction."""
+class _SharedPositions:
+    """One /positions request per tick for every tracker, instead of one each.
 
+    Relies on each returned position carrying the detailsReference it was asked
+    for. If the server answers without them, trackers go back to asking one by one.
+    """
+
+    def __init__(self, hass: HomeAssistant, api: VtjpAdapter) -> None:
+        self._hass = hass
+        self._api = api
+        self._usable = True
+        self._retry_at: datetime | None = None
+
+    async def fetch(self, trackers: list[VasttrafikVehicleTracker]) -> dict[str, dict] | None:
+        """detailsReference → position, or None when trackers must ask themselves."""
+        if not self._usable:
+            return None
+        now = ha_now()
+        if self._retry_at and now < self._retry_at:
+            return {}
+        wanted = [t.wanted_position() for t in trackers]
+        wanted = [w for w in wanted if w]
+        if not wanted:
+            return {}
+        refs = list(dict.fromkeys(ref for ref, _, _ in wanted))
+        lower = (min(lat for _, lat, _ in wanted) - _BBOX_DEG, min(lon for _, _, lon in wanted) - _BBOX_DEG)
+        upper = (max(lat for _, lat, _ in wanted) + _BBOX_DEG, max(lon for _, _, lon in wanted) + _BBOX_DEG)
+
+        def _fetch() -> list[dict]:
+            return self._api.get_vehicle_positions(
+                lower_left=lower, upper_right=upper, details_references=refs, limit=200
+            )
+
+        try:
+            positions = await self._hass.async_add_executor_job(_fetch)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("/positions fetch failed: %s", exc)
+            self._retry_at = now + _POSITIONS_BACKOFF
+            return {}
+        self._retry_at = None
+        by_ref = {p.get("detailsReference"): p for p in positions if p.get("detailsReference") in refs}
+        if positions and not by_ref:
+            self._usable = False
+            return None
+        return by_ref
+
+
+class VasttrafikVehicleTracker(TrackerEntity):
     _attr_has_entity_name = True
     _attr_name            = "Position"
     _attr_attribution     = "Data provided by Västtrafik"
     _attr_should_poll     = False
+    _attr_source_type     = SourceType.GPS
+    _attr_available       = False
 
     def __init__(
         self,
         hass: HomeAssistant,
         api: VtjpAdapter,
-        coordinator: Any,
+        coordinator: VasttrafikDepartureCoordinator,
         ml: dict,
         entry_id: str,
-        idx: int,
     ) -> None:
         self.hass = hass
         self._api = api
         self._coordinator = coordinator
         self._ml  = ml
 
-        stop_gid    = ml.get(CONF_STOP_GID, "")
-        line_name   = ml.get(CONF_LINE_NAME, "")
-        # Same dir_key as the sensor so both entities land in one device group.
-        dir_key     = dir_key_for_line(ml)
-
-        self._attr_unique_id   = f"{entry_id}_vt_{stop_gid}_{line_name}_{dir_key}"
+        self._attr_unique_id   = f"{entry_id}_vt_{line_key(ml)}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
+        self._attr_icon = _MODE_ICON.get((ml.get(CONF_TRANSPORT_MODE) or "bus").lower(), "mdi:bus")
+        self._attr_extra_state_attributes: dict[str, Any] = {}
 
-        mode = (ml.get(CONF_TRANSPORT_MODE) or "bus").lower()
-        self._attr_icon = _MODE_ICON.get(mode, "mdi:bus")
-
-        self._delay = timedelta(minutes=ml.get(CONF_DELAY, DEFAULT_DELAY))
-        self._lat:  float | None = None
-        self._lon:  float | None = None
-        self._available = False
-        self._extra: dict[str, Any] = {}
-
-        # Stop coordinates — captured once from the first departure's stopPoint
+        # Centre of the /positions bounding box, taken from the first departure.
         self._stop_lat: float | None = None
         self._stop_lon: float | None = None
-
-        # Latched on first 404/501 from /positions to skip further retries.
-        self._positions_unavailable = False
+        self._positions_retry_at: datetime | None = None
         self._position_notes: list[str] = []
 
-        # Cache the journey path per detailsReference: fetch once per trip, not per tick.
-        self._path_cache_ref: str | None = None
-        self._path_cache: tuple[list[dict], list[dict]] | None = None
+    def _set_position(self, pos: tuple[float, float], accuracy: int, extra: dict) -> None:
+        self._attr_latitude, self._attr_longitude = pos
+        self._attr_location_accuracy = accuracy
+        self._attr_extra_state_attributes = extra
+        self._attr_available = True
 
-    # ── TrackerEntity ─────────────────────────────────────────────────────────
-
-    @property
-    def source_type(self) -> SourceType:
-        return SourceType.GPS
-
-    @property
-    def latitude(self) -> float | None:
-        return self._lat
-
-    @property
-    def longitude(self) -> float | None:
-        return self._lon
-
-    @property
-    def location_accuracy(self) -> int:
-        return 10 if self._extra.get("position_source") == "realtime_gps" else 75
-
-    @property
-    def available(self) -> bool:
-        return self._available
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return self._extra
+    def _set_unavailable(self, status: str | None = None) -> None:
+        self._attr_available = False
+        if status:
+            self._attr_extra_state_attributes = {"status": status}
 
     # ── Update ────────────────────────────────────────────────────────────────
 
-    async def async_update(self) -> None:
-        stop_gid       = self._ml[CONF_STOP_GID]
-        line_name      = self._ml[CONF_LINE_NAME]
-        direction_str  = self._ml.get(CONF_DIRECTION) or None
-        current_time   = ha_now()
+    def wanted_position(self) -> tuple[str, float, float] | None:
+        """(detailsReference, stop latitude, stop longitude) of the tracked trip."""
+        dep = (self._coordinator.data or {}).get("tracked") or {}
+        sp = dep.get("realtimeStopPoint") or dep.get("stopPoint") or {}
+        lat, lon = to_float(sp.get("latitude")), to_float(sp.get("longitude"))
+        ref = dep.get("detailsReference")
+        return (ref, lat, lon) if ref and lat is not None and lon is not None else None
 
-        # Reuse the shared coordinator's look-back window; no own fetch here.
-        departures = (self._coordinator.data or {}).get("departures") or []
-        if not departures:
-            self._available = False
+    async def async_update(self, shared: dict[str, dict] | None = None) -> None:
+        current_time = ha_now()
+        data = self._coordinator.data or {}
+        dep = data.get("tracked")
+        if dep is None:
+            self._set_unavailable(
+                f"No upcoming departure for line {self._ml.get(CONF_LINE_NAME)}"
+            )
             return
 
         # Prefer realtimeStopPoint: the boarding stop can be relocated live.
-        if self._stop_lat is None and departures:
-            sp = departures[0].get("realtimeStopPoint") or departures[0].get("stopPoint") or {}
+        if self._stop_lat is None:
+            sp = dep.get("realtimeStopPoint") or dep.get("stopPoint") or {}
             self._stop_lat = to_float(sp.get("latitude"))
             self._stop_lon = to_float(sp.get("longitude"))
 
-        dep, details_ref = _find_departure(
-            departures, line_name, direction_str, current_time
-        )
-        if dep is None:
-            self._available = False
-            dir_label = direction_str or "any direction"
-            self._extra = {
-                "status": f"No active service for line {line_name} ({dir_label})"
-            }
-            return
-
         sj   = dep.get("serviceJourney") or {}
         line = sj.get("line") or {}
-        mode = (line.get("transportMode") or "bus").upper()
-        self._attr_icon = {
-            "BUS": "mdi:bus", "TRAM": "mdi:tram",
-            "TRAIN": "mdi:train", "FERRY": "mdi:ferry", "TAXI": "mdi:taxi",
-        }.get(mode, "mdi:bus")
-
-        dep_time = parse_dt(
-            dep.get("estimatedOtherwisePlannedTime")
-            or dep.get("estimatedTime")
-            or dep.get("plannedTime")
-        )
-
-        # Tier 1: live GPS pinned to this exact detailsReference.
-        if not self._positions_unavailable and self._stop_lat is not None and details_ref:
-            pos = await self._try_positions(details_ref)
-            if pos is not None:
-                self._lat, self._lon = pos
-                self._available = True
-                self._extra = {
-                    "line":             line.get("shortName"),
-                    "transport_mode":   line.get("transportMode"),
-                    "direction":        sj.get("direction"),
-                    "details_reference": details_ref,
-                    "departed_at":      dep_time.strftime("%H:%M") if dep_time else None,
-                    "position_source":  "realtime_gps",
-                    "notes":            self._position_notes,
-                }
-                return
-
-        # Tier 2: interpolate along the journey's GPS path.
-        if not details_ref:
-            self._available = False
-            self._extra = {"status": "No detailsReference — cannot fetch journey path"}
-            return
-
-        path_data = await self._fetch_journey_path(stop_gid, details_ref)
-        if path_data is None:
-            self._available = False
-            return
-
-        coords, calls = path_data
-        pos = _interpolate_on_path(coords, calls, current_time)
-
-        if pos is None:
-            self._available = False
-            self._extra = {"status": "Insufficient stop coordinates for interpolation"}
-            return
-
-        self._lat, self._lon = pos
-        self._available = True
-
-        self._extra = {
+        self._attr_icon = _MODE_ICON.get((line.get("transportMode") or "bus").lower(), "mdi:bus")
+        details_ref = dep.get("detailsReference")
+        dep_time = best_departure_dt(dep)
+        common = {
             "line":              line.get("shortName"),
             "transport_mode":    line.get("transportMode"),
             "direction":         sj.get("direction"),
             "details_reference": details_ref,
-            "departed_at":       dep_time.strftime("%H:%M") if dep_time else None,
-            "current_segment":   _segment_label(calls, current_time),
-            "next_stop":         _next_stop_name(calls, current_time),
-            "progress_percent":  _progress_percent(calls, current_time),
-            "route_points":      len(coords),
-            "total_stops":       len(calls),
-            "position_source":   "path_interpolation",
+            "departure_time":    hhmm(dep_time),
+            "minutes_to_stop": (
+                max(0, int((dep_time - current_time).total_seconds() // 60)) if dep_time else None
+            ),
         }
+
+        journey = await self._coordinator.async_journey(dep)
+        coords, calls = journey if journey else ([], [])
+        if calls:
+            common.update({
+                "stops_away":       _stops_away(calls, self._ml[CONF_STOP_GID], current_time),
+                "current_segment":  _segment_label(calls, current_time),
+                "next_stop":        _next_stop_name(calls, current_time),
+                "progress_percent": _progress_percent(calls, current_time),
+            })
+
+        # Tier 1: live position pinned to this exact trip.
+        positions_ok = (
+            self._positions_retry_at is None or current_time >= self._positions_retry_at
+        )
+        pos = None
+        if shared is not None:
+            pos = self._read_position(shared.get(details_ref))
+        elif positions_ok and self._stop_lat is not None and details_ref:
+            pos = await self._try_positions(details_ref)
+        if pos is not None:
+            self._set_position(pos, 10, {
+                **common, "position_source": "realtime_gps", "notes": self._position_notes,
+            })
+            return
+
+        # Tier 2: interpolate along the trip's path.
+        pos = _interpolate_on_path(coords, calls, current_time) if coords and calls else None
+        if pos is None or pos[0] is None or pos[1] is None:
+            self._set_unavailable("No position data for this trip")
+            return
+        self._set_position(pos, 75, {
+            **common,
+            "route_points":    len(coords),
+            "total_stops":     len(calls),
+            "position_source": "path_interpolation",
+        })
 
     # ── Tier 1 ────────────────────────────────────────────────────────────────
 
@@ -270,125 +266,48 @@ class VasttrafikVehicleTracker(TrackerEntity):
 
         try:
             positions = await self.hass.async_add_executor_job(_fetch)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Back off rather than give up: one timeout must not disable live
+            # positions until the next restart.
             _LOGGER.debug("/positions fetch failed: %s", exc)
-            self._positions_unavailable = True
+            self._positions_retry_at = ha_now() + _POSITIONS_BACKOFF
             return None
+        self._positions_retry_at = None
 
         if not positions:
             return None
 
-        pos = positions[0]
+        return self._read_position(next(
+            (p for p in positions if p.get("detailsReference") == details_ref),
+            positions[0],
+        ))
+
+    def _read_position(self, pos: dict | None) -> tuple[float, float] | None:
+        if not pos:
+            return None
+        lat_v = to_float(pos.get("latitude"))
+        lon_v = to_float(pos.get("longitude"))
+        if lat_v is None or lon_v is None:
+            return None
         self._position_notes = [
             n.get("text") for n in (pos.get("notes") or []) if n.get("text")
         ]
-        lat_v = to_float(pos.get("latitude"))
-        lon_v = to_float(pos.get("longitude"))
-        if lat_v is not None and lon_v is not None:
-            direction = pos.get("direction") or ""
-            _LOGGER.debug(
-                "Realtime GPS for ref %s: %.5f, %.5f (%s)",
-                details_ref[:16], lat_v, lon_v, direction,
-            )
-            return (lat_v, lon_v)
-
-        return None
-
-    # ── Tier 2 ────────────────────────────────────────────────────────────────
-
-    async def _fetch_journey_path(
-        self, stop_gid: str, details_ref: str
-    ) -> tuple[list[dict], list[dict]] | None:
-        """Fetch (coords, calls) for the trip, cached per detailsReference since
-        the route geometry is fixed for the life of the trip."""
-        if self._path_cache_ref == details_ref and self._path_cache is not None:
-            return self._path_cache
-
-        def _fetch() -> dict:
-            return self._api.get_departure_details(
-                stop_gid,
-                details_ref,
-                includes=["servicejourneycalls", "servicejourneycoordinates"],
-            )
-
-        try:
-            data = await self.hass.async_add_executor_job(_fetch)
-        except Exception as exc:
-            _LOGGER.debug(
-                "Departure details failed for %s: %s", details_ref[:16], exc, exc_info=True
-            )
-            return None
-
-        sjs = data.get("serviceJourneys") or []
-        if not sjs:
-            return None
-        sj = sjs[0]
-
-        coords = sj.get("serviceJourneyCoordinates") or []
-        calls  = sj.get("callsOnServiceJourney") or []
-
-        if not coords or not calls:
-            _LOGGER.debug(
-                "Departure details for %s: coords=%d calls=%d (too few for interpolation)",
-                details_ref[:16], len(coords), len(calls),
-            )
-            return None
-
-        self._path_cache_ref = details_ref
-        self._path_cache = (coords, calls)
-        return coords, calls
+        return (lat_v, lon_v)
 
 
 # ─────────────────────────── Pure helpers ────────────────────────────────────
 
-def _find_departure(
-    departures: list[dict],
-    line_name: str,
-    direction_str: str | None,
-    now: datetime,
-) -> tuple[dict | None, str | None]:
-    """Best departure + detailsReference for this line/direction. Line matches
-    exactly; direction is a case-insensitive substring safety net. Prefer the
-    most recently departed vehicle (en route now), else the soonest upcoming."""
-    best_past:      tuple[dict, str] | None = None
-    best_past_t:    datetime | None = None
-    best_future:    tuple[dict, str] | None = None
-    best_future_t:  datetime | None = None
-    dir_lower = direction_str.lower() if direction_str else None
-
-    for dep in departures:
-        if dep.get("isCancelled"):
-            continue
-        sj   = dep.get("serviceJourney") or {}
-        line = sj.get("line") or {}
-
-        if line.get("shortName") != line_name:
-            continue
-
-        if dir_lower:
-            dep_direction = sj.get("direction") or ""
-            if dep_direction and short_direction(dir_lower) != short_direction(dep_direction):
-                continue
-
-        ref = dep.get("detailsReference") or ""
-        t   = parse_dt(
-            dep.get("estimatedOtherwisePlannedTime")
-            or dep.get("estimatedTime")
-            or dep.get("plannedTime")
-        )
-        if t is None:
-            continue
-
-        if t <= now:
-            # Latest past departure = the bus still en route, not the first seen.
-            if best_past_t is None or t > best_past_t:
-                best_past, best_past_t = (dep, ref), t
-        else:
-            if best_future_t is None or t < best_future_t:
-                best_future, best_future_t = (dep, ref), t
-
-    chosen = best_past or best_future
-    return (chosen[0], chosen[1]) if chosen else (None, None)
+def _stops_away(calls: list[dict], stop_gid: str, now: datetime) -> int | None:
+    """Stops the vehicle still has to reach before yours: 0 means yours is next.
+    None once it has passed."""
+    board = boarding_index(calls, stop_gid)
+    if board is None:
+        return None
+    heading_to = next(
+        (i for i, call in enumerate(calls) if (_call_arr_time(call) or _call_dep_time(call) or now) > now),
+        len(calls),
+    )
+    return board - heading_to if heading_to <= board else None
 
 
 def _call_dep_time(call: dict) -> datetime | None:

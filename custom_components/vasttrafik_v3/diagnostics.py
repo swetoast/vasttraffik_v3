@@ -29,12 +29,34 @@ async def async_get_config_entry_diagnostics(
             "name": coord.name,
             "last_update_success": coord.last_update_success,
             "departure_count": len(departures),
+            "matched_count": len(data.get("matched") or []),
+            "direction_matched": data.get("direction_matched"),
             "next_arrival": data.get("next_arrival"),
         })
+
+    routes = [
+        {
+            "name": route.name,
+            "last_update_success": route.last_update_success,
+            "journey_count": len(route.data or []),
+            "home_end": route.home_end,
+            "ticket": route.ticket,
+        }
+        for route in (store.get("routes") or {}).values()
+    ]
+    parking = store.get("parking")
 
     return {
         "entry_data": async_redact_data(dict(entry.data), TO_REDACT),
         "monitored_line_count": len(entry.data.get(CONF_MONITORED_LINES, [])),
         "disruptions_unavailable": bool(getattr(api, "disruptions_unavailable", False)),
         "coordinators": lines,
+        "routes": routes,
+        "parking_area_count": len((parking.data if parking else None) or {}),
+        "stop_details": store.get("stops") or {},
+        "api_switches": store.get("switches") or {},
+        "optional_apis": {
+            name: bool(api and api.optional_api_available(name))
+            for name in ("Geografi", "Pendelparkering")
+        },
     }

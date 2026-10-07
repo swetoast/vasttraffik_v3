@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -21,8 +22,10 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from ._helpers import line_key, walk_minutes
 from .api import VtjpAdapter
 from .const import (
+    API_SWITCHES,
     CONF_DELAY,
     CONF_DIRECTION,
     CONF_DIRECTION_GID,
@@ -38,6 +41,7 @@ from .const import (
     CONF_STOP_GID,
     CONF_STOP_NAME,
     CONF_TRANSPORT_MODE,
+    CONF_USE_HOME,
     DEFAULT_DELAY,
     DEFAULT_LANGUAGE,
     SUPPORTED_LANGUAGES,
@@ -56,6 +60,62 @@ def _stop_label(loc: dict) -> str:
     name = loc.get("name") or "Unknown stop"
     muni = loc.get("municipality") or ""
     return f"{name} – {muni}" if muni and muni.lower() not in name.lower() else name
+
+
+async def async_nearby_stops(hass: HomeAssistant, adapter: VtjpAdapter | None) -> list[dict]:
+    """Stops around Home Assistant's home location, offered as suggestions."""
+    lat, lon = hass.config.latitude, hass.config.longitude
+    if adapter is None or (not lat and not lon):
+        return []
+    try:
+        return await hass.async_add_executor_job(adapter.nearby_stops, lat, lon)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug("Nearby stop lookup failed: %s", exc)
+        return []
+
+
+def apis_schema(current: dict[str, bool]) -> vol.Schema:
+    return vol.Schema({
+        vol.Optional(key, default=current.get(key, True)): BooleanSelector()
+        for key in API_SWITCHES
+    })
+
+
+def api_defaults(access: dict[str, bool | None]) -> dict[str, bool]:
+    """Tick what the key can use; an API that could not be checked stays ticked."""
+    return {key: access.get(name) is not False for key, name in API_SWITCHES.items()}
+
+
+def refused_choice(choice: dict, access: dict[str, bool | None]) -> bool:
+    """True if something is switched on that the key is known not to have."""
+    return any(choice.get(key) and access.get(name) is False for key, name in API_SWITCHES.items())
+
+
+def start_stop_schema(nearby: list[dict]) -> vol.Schema:
+    """One field: pick a nearby stop or type any stop name."""
+    if not nearby:
+        selector: Any = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+    else:
+        selector = SelectSelector(SelectSelectorConfig(
+            options=[
+                {
+                    "value": stop["name"],
+                    "label": f"{stop['name']} · {stop.get('straightLineDistanceInMeters') or 0} m",
+                }
+                for stop in nearby
+            ],
+            custom_value=True,
+            mode=SelectSelectorMode.DROPDOWN,
+        ))
+    return vol.Schema({vol.Required(CONF_STOP_NAME): selector})
+
+
+def nearby_match(nearby: list[dict], name: str) -> tuple[str, int] | None:
+    """(gid, estimated walk minutes) when *name* is one of the suggestions."""
+    stop = next((s for s in nearby if s["name"] == name), None)
+    if stop is None:
+        return None
+    return stop["gid"], min(30, walk_minutes(stop.get("straightLineDistanceInMeters")))
 
 
 def _natural_sort_key(s: str) -> tuple[int, str]:
@@ -124,13 +184,6 @@ def _directions_for_line(departures: list[dict], line_name: str) -> list[dict]:
     return list(seen.values())
 
 
-async def options_update_listener(
-    hass: HomeAssistant, entry: config_entries.ConfigEntry
-) -> None:
-    """Reload the integration when config data changes."""
-    await hass.config_entries.async_reload(entry.entry_id)
-
-
 # ─────────────────────────── Options flow ────────────────────────────────────
 
 class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
@@ -145,6 +198,10 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         self._key:      str = config_entry.data.get(CONF_KEY,      "")
         self._secret:   str = config_entry.data.get(CONF_SECRET,   "")
         self._language: str = config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        self._use_home: bool = config_entry.data.get(CONF_USE_HOME, False)
+        self._apis: dict[str, bool] = {
+            key: config_entry.data.get(key, True) for key in API_SWITCHES
+        }
         self._adapter: VtjpAdapter | None = None
 
         # Per-iteration state — cleared by _reset().
@@ -156,6 +213,10 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         self._stop_picker_for:  str = ""
         self._live_departures:  list[dict] = []
         self._available_lines:  list[dict] = []
+        self._journey_line_dirs: dict[str, str] = {}
+        self._nearby: list[dict] | None = None
+        self._walk: int | None = None
+        self._edit_index: int = 0
         self._line_name:    str = ""
         self._line_gid:     str = ""
         self._line_mode:    str = ""
@@ -169,6 +230,8 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         self._stop_picker_for = ""
         self._live_departures = []
         self._available_lines = []
+        self._journey_line_dirs = {}
+        self._walk = None
         self._line_name = self._line_gid = self._line_mode = ""
         self._direction = self._direction_gid = ""
 
@@ -204,21 +267,40 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_menu()
 
     async def async_step_menu(self, user_input: dict | None = None) -> dict:
-        if user_input:
+        if user_input is not None:
             action = user_input.get("action", "")
             if action == "add":
                 return await self.async_step_start_stop()
+            if action == "edit":
+                return await self.async_step_edit()
             if action == "remove":
                 return await self.async_step_remove()
+            if action == "apis":
+                return await self.async_step_apis()
+            if action == "home":
+                self._use_home = not self._use_home
+                self._nearby = None
+                return await self.async_step_menu()
             if action == "language":
                 return await self.async_step_language()
             return self._save()
 
         options = [{"value": "add", "label": "Add a monitored line"}]
         if self._monitored:
+            options.append({"value": "edit", "label": "Change walk time or name of a line"})
             options.append({"value": "remove", "label": "Remove a monitored line"})
         lang_label = SUPPORTED_LANGUAGES.get(self._language, self._language)
         options.append({"value": "language", "label": f"Language: {lang_label}"})
+        options.append({
+            "value": "home",
+            "label": "Use home location for suggestions and door-to-door trips: "
+                     + ("on (select to turn off)" if self._use_home else "off (select to turn on)"),
+        })
+        used = [name for key, name in API_SWITCHES.items() if self._apis[key]]
+        options.append({
+            "value": "apis",
+            "label": "Extra Västtrafik APIs in use: " + (", ".join(used) or "none"),
+        })
         options.append({"value": "save", "label": "Save and close"})
 
         return self.async_show_form(
@@ -232,7 +314,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_language(self, user_input: dict | None = None) -> dict:
         """Change the API response language."""
-        if user_input:
+        if user_input is not None:
             self._language = user_input.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
             return await self.async_step_menu()
 
@@ -252,16 +334,46 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             }),
         )
 
+    async def async_step_apis(self, user_input: dict | None = None) -> dict:
+        """Choose which APIs beyond Planera Resa to use. The key is asked what
+        it has access to, so one it lacks cannot be switched on by mistake."""
+        errors: dict = {}
+        if not await self._ensure_adapter():
+            errors["base"] = "cannot_connect"
+            access: dict[str, bool | None] = {}
+        else:
+            access = await self.hass.async_add_executor_job(
+                self._adapter.probe_optional_apis  # type: ignore[union-attr]
+            )
+        if user_input is not None and not errors:
+            choice = {key: bool(user_input.get(key)) for key in API_SWITCHES}
+            if refused_choice(choice, access):
+                errors["base"] = "api_not_enabled"
+            else:
+                self._apis = choice
+                return await self.async_step_menu()
+        return self.async_show_form(
+            step_id="apis",
+            data_schema=apis_schema(
+                {key: bool(user_input.get(key)) for key in API_SWITCHES}
+                if user_input is not None else self._apis
+            ),
+            errors=errors,
+        )
+
     # ── Add: start stop ───────────────────────────────────────────────────────
 
     async def async_step_start_stop(self, user_input: dict | None = None) -> dict:
         errors: dict = {}
-        if user_input:
+        if user_input is not None:
             name = (user_input.get(CONF_STOP_NAME) or "").strip()
             if not name:
                 errors["base"] = "station_required"
             elif not await self._ensure_adapter():
                 errors["base"] = "cannot_connect"
+            elif picked := nearby_match(self._nearby or [], name):
+                self._start_name, (self._start_gid, self._walk) = name, picked
+                return await self.async_step_end_stop()
             else:
                 try:
                     results = await self.hass.async_add_executor_job(
@@ -285,13 +397,14 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                         self._stop_picker_for = "start"
                         return await self.async_step_pick_stop()
 
+        if self._nearby is None:
+            await self._ensure_adapter()
+            self._nearby = (
+                await async_nearby_stops(self.hass, self._adapter) if self._use_home else []
+            )
         return self.async_show_form(
             step_id="start_stop",
-            data_schema=vol.Schema({
-                vol.Required(CONF_STOP_NAME): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.TEXT)
-                ),
-            }),
+            data_schema=start_stop_schema(self._nearby),
             description_placeholders={"example": "Brunnsparken, Göteborg"},
             errors=errors,
         )
@@ -300,7 +413,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_end_stop(self, user_input: dict | None = None) -> dict:
         errors: dict = {}
-        if user_input:
+        if user_input is not None:
             name = (user_input.get(CONF_END_STOP_NAME) or "").strip()
             if name:
                 if not await self._ensure_adapter():
@@ -348,7 +461,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
     # ── Shared stop picker ────────────────────────────────────────────────────
 
     async def async_step_pick_stop(self, user_input: dict | None = None) -> dict:
-        if user_input:
+        if user_input is not None:
             chosen_gid = user_input.get("picked_stop", "")
             chosen = next(
                 (r for r in self._stop_candidates if _gid(r) == chosen_gid),
@@ -380,8 +493,10 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         stop_gid = self._start_gid
 
         def _do_fetch() -> list[dict]:
+            # A full day at the default 2 per line+direction lists every line
+            # serving the stop, including ones not running in the next hour.
             return self._adapter.get_departures(  # type: ignore[union-attr]
-                stop_gid, limit=60
+                stop_gid, limit=60, time_span_minutes=1440, max_pages=4
             )
 
         try:
@@ -396,19 +511,11 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             start_gid = self._start_gid
             end_gid   = self._end_gid
 
-            def _plan() -> dict:
-                return self._adapter.plan_journey(  # type: ignore[union-attr]
-                    start_gid, end_gid, limit=10
-                )
-
             try:
-                plan = await self.hass.async_add_executor_job(_plan)
-                journey_lines: set[str] = set()
-                for result in (plan.get("results") or []):
-                    for leg in (result.get("tripLegs") or []):
-                        short = ((leg.get("serviceJourney") or {}).get("line") or {}).get("shortName") or ""
-                        if short:
-                            journey_lines.add(short)
+                self._journey_line_dirs = await self.hass.async_add_executor_job(
+                    self._adapter.line_directions, start_gid, end_gid  # type: ignore[union-attr]
+                )
+                journey_lines = set(self._journey_line_dirs)
                 all_lines = _lines_from_departures(self._live_departures)
                 filtered  = [l for l in all_lines if l["short_name"] in journey_lines]
                 self._available_lines = filtered if filtered else all_lines
@@ -425,7 +532,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
     # ── Pick line ─────────────────────────────────────────────────────────────
 
     async def async_step_pick_line(self, user_input: dict | None = None) -> dict:
-        if user_input:
+        if user_input is not None:
             short = (user_input.get("line") or "").strip()
             match = next((l for l in self._available_lines if l["short_name"] == short), None)
             self._line_name = short
@@ -433,16 +540,18 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             self._line_mode = (match or {}).get("transport_mode") or "bus"
 
             if self._end_name:
-                dirs = _directions_for_line(self._live_departures, short)
-                end_lower = self._end_name.lower()
-                best = next((d for d in dirs if end_lower in d["direction"].lower()), None)
-                if best:
-                    self._direction     = best["direction"]
-                    self._direction_gid = best["direction_gid"] or ""
-                    if not self._direction_gid:
-                        self._direction_gid = await self._resolve_direction_gid(
-                            short, self._direction
-                        )
+                # The journey plan knows which way reaches the end stop; a
+                # headsign match is only the fallback.
+                planned = self._journey_line_dirs.get(short, "")
+                if not planned:
+                    dirs = _directions_for_line(self._live_departures, short)
+                    end_lower = self._end_name.lower()
+                    planned = next(
+                        (d["direction"] for d in dirs if end_lower in d["direction"].lower()), ""
+                    )
+                if planned:
+                    self._direction     = planned
+                    self._direction_gid = await self._resolve_direction_gid(short, planned)
                     return await self.async_step_line_options()
 
             return await self.async_step_pick_direction()
@@ -460,7 +569,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_line_manual(self, user_input: dict | None = None) -> dict:
         errors: dict = {}
-        if user_input:
+        if user_input is not None:
             name = (user_input.get(CONF_LINE_NAME) or "").strip()
             if not name:
                 errors["base"] = "line_required"
@@ -482,7 +591,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
     async def async_step_pick_direction(self, user_input: dict | None = None) -> dict:
-        if user_input:
+        if user_input is not None:
             chosen = (user_input.get("direction") or "").strip()
             if chosen == "__any__" or not chosen:
                 self._direction = self._direction_gid = ""
@@ -517,7 +626,7 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         elif self._direction:
             default_name += f" → {self._direction}"
 
-        if user_input:
+        if user_input is not None:
             entry: dict = {
                 CONF_STOP_NAME:      self._start_name,
                 CONF_STOP_GID:       self._start_gid,
@@ -534,6 +643,8 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             if self._direction:
                 entry[CONF_DIRECTION]     = self._direction
                 entry[CONF_DIRECTION_GID] = self._direction_gid
+            if any(line_key(m) == line_key(entry) for m in self._monitored):
+                return self._show_line_options(default_name, {"base": "line_exists"})
             self._monitored.append(entry)
 
             if user_input.get("add_another"):
@@ -541,11 +652,17 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_start_stop()
             return self._save()
 
+        return self._show_line_options(default_name)
+
+    def _show_line_options(self, default_name: str, errors: dict | None = None) -> dict:
         direction_label = self._direction or self._end_name or "any direction"
         return self.async_show_form(
             step_id="line_options",
+            errors=errors or {},
             data_schema=vol.Schema({
-                vol.Optional(CONF_DELAY, default=DEFAULT_DELAY): NumberSelector(
+                vol.Optional(
+                    CONF_DELAY, default=DEFAULT_DELAY if self._walk is None else self._walk
+                ): NumberSelector(
                     NumberSelectorConfig(
                         min=0, max=30, step=1,
                         unit_of_measurement="min",
@@ -564,12 +681,64 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
             },
         )
 
+    # ── Edit ──────────────────────────────────────────────────────────────────
+
+    async def async_step_edit(self, user_input: dict | None = None) -> dict:
+        """Pick the line to change. Walk time and name are not part of a line's
+        identity, so its entities keep their IDs."""
+        if not self._monitored:
+            return self.async_abort(reason="no_lines")
+        if user_input is not None or len(self._monitored) == 1:
+            self._edit_index = int((user_input or {}).get("line", 0))
+            return await self.async_step_edit_line()
+        options = [
+            {"value": str(i), "label": m.get(CONF_NAME) or f"{m.get(CONF_LINE_NAME)} – {m.get(CONF_STOP_NAME)}"}
+            for i, m in enumerate(self._monitored)
+        ]
+        return self.async_show_form(
+            step_id="edit",
+            data_schema=vol.Schema({
+                vol.Required("line"): SelectSelector(
+                    SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST)
+                ),
+            }),
+        )
+
+    async def async_step_edit_line(self, user_input: dict | None = None) -> dict:
+        line = self._monitored[self._edit_index]
+        if user_input is not None:
+            self._monitored[self._edit_index] = {
+                **line,
+                CONF_DELAY: int(user_input.get(CONF_DELAY, DEFAULT_DELAY)),
+                CONF_NAME: (user_input.get(CONF_NAME) or line.get(CONF_NAME) or "").strip(),
+            }
+            return self._save()
+        return self.async_show_form(
+            step_id="edit_line",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_DELAY, default=line.get(CONF_DELAY, DEFAULT_DELAY)): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=30, step=1,
+                        unit_of_measurement="min",
+                        mode=NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Optional(CONF_NAME, default=line.get(CONF_NAME, "")): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
+            }),
+            description_placeholders={
+                "line": str(line.get(CONF_LINE_NAME)),
+                "stop": str(line.get(CONF_STOP_NAME)),
+            },
+        )
+
     # ── Remove ────────────────────────────────────────────────────────────────
 
     async def async_step_remove(self, user_input: dict | None = None) -> dict:
         if not self._monitored:
             return self.async_abort(reason="no_lines")
-        if user_input:
+        if user_input is not None:
             keep = set(user_input.get("keep", []))
             self._monitored = [m for i, m in enumerate(self._monitored) if str(i) in keep]
             return self._save()
@@ -588,14 +757,18 @@ class VasttrafikOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
     def _save(self) -> dict:
-        self.hass.config_entries.async_update_entry(
+        changed = self.hass.config_entries.async_update_entry(
             self._entry,
             data={
                 CONF_KEY:             self._key,
                 CONF_SECRET:          self._secret,
                 CONF_LANGUAGE:        self._language,
+                CONF_USE_HOME:        self._use_home,
+                **self._apis,
                 CONF_MONITORED_LINES: self._monitored,
             },
         )
+        if changed:
+            self.hass.config_entries.async_schedule_reload(self._entry.entry_id)
         return self.async_create_entry(title="", data={})
 

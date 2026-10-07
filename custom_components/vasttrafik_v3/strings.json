@@ -6,10 +6,12 @@
         "description": "Get your credentials from [developer.vasttrafik.se](https://developer.vasttrafik.se) → My Applications → create an app → copy the key and secret.",
         "data": {
           "key": "API Key",
-          "secret": "API Secret"
+          "secret": "API Secret",
+          "use_home": "Use my home location"
         },
         "data_description": {
-          "secret": "Stored securely and never shown again"
+          "secret": "Stored securely and never shown again",
+          "use_home": "Sends Home Assistant's home coordinate to Västtrafik to suggest nearby stops and to plan trips from and to your door. Turn off to keep it private."
         }
       },
       "reauth_confirm": {
@@ -22,7 +24,7 @@
       },
       "start_stop": {
         "title": "Where do you board?",
-        "description": "Enter the name of your boarding stop. If multiple matches are found you will be shown a list to pick from.\n\nExample: {example}",
+        "description": "Pick a stop near your home or type any stop name, e.g. {example}.",
         "data": {
           "stop_name": "Stop name"
         },
@@ -70,7 +72,7 @@
       },
       "line_options": {
         "title": "All set!",
-        "description": "**Line {line}** from **{stop}** → **{direction}**\n\nThree entities will be created automatically:\n- 🕐  **Departure time** — next bus with realtime delay and platform\n- ⚠️  **Störning** — live service disruption alerts\n- 📍  **Position** — vehicle location on the map (interpolated, updated every 60 s)",
+        "description": "**Line {line}** from **{stop}** → **{direction}**\n\nThree entities will be created automatically:\n- 🕐 **Departure time** — next departure with realtime delay and platform\n- ⚠️ **Disruption** — live service disruption alerts\n- 📍 **Position** — vehicle location on the map when available",
         "data": {
           "delay": "Walk time to stop",
           "name": "Name",
@@ -78,7 +80,21 @@
         },
         "data_description": {
           "delay": "Show departures at least this many minutes in the future — set this to your walk time.",
-          "name": "Prefix used for all three entities. Leave blank to use the auto-generated name."
+          "name": "Prefix used for all related entities. Leave blank to use the auto-generated name."
+        }
+      },
+      "apis": {
+        "title": "Extra Västtrafik APIs",
+        "description": "Disruptions, stop details and commuter parking come from separate Västtrafik APIs. Each has to be added to your application at [developer.vasttrafik.se](https://developer.vasttrafik.se) before your key can use it. The boxes below are ticked for the ones your key can use right now; the rest of the integration works without them.",
+        "data": {
+          "use_disruptions": "Disruptions (Störning)",
+          "use_geografi": "Stop details and tariff zones (Geografi)",
+          "use_parking": "Commuter parking (Smart Pendelparkering)"
+        },
+        "data_description": {
+          "use_disruptions": "Disruption sensors and disruption alerts.",
+          "use_geografi": "Tariff zones, Närtrafik and parking facilities.",
+          "use_parking": "Free spaces, forecasts and cameras for parkings at the stops you board at."
         }
       }
     },
@@ -88,17 +104,13 @@
       "station_required": "Please enter a stop name.",
       "station_not_found": "No stop found. Try adding the city, e.g. 'Brunnsparken, Göteborg'.",
       "line_required": "Please enter a line name.",
-      "unknown": "An unexpected error occurred — check the HA log for details."
+      "unknown": "An unexpected error occurred — check the Home Assistant log for details.",
+      "line_exists": "That line is already monitored from this stop in this direction.",
+      "api_not_enabled": "Your API key has no access to one of the ticked APIs. Add it to your application at developer.vasttrafik.se first, or untick it."
     },
     "abort": {
-      "already_configured": "This Västtrafik account is already configured. Use the ⚙️ button to add more lines.",
+      "already_configured": "This Västtrafik account is already configured. Use the options button to add more lines.",
       "reauth_successful": "Västtrafik reconnected successfully."
-    }
-  },
-  "issues": {
-    "storning_unavailable": {
-      "title": "Västtrafik disruption data unavailable",
-      "description": "The Störning (disruption) API returned an access error. This is a separate subscription on developer.vasttrafik.se — grant the TrafficSituations API to your application to enable the disruption sensors. Until then they stay off."
     }
   },
   "options": {
@@ -111,7 +123,7 @@
       },
       "start_stop": {
         "title": "Where do you board?",
-        "description": "Example: {example}",
+        "description": "Pick a stop near your home or type any stop name, e.g. {example}.",
         "data": {
           "stop_name": "Start stop"
         }
@@ -165,6 +177,34 @@
         "data": {
           "keep": "Keep"
         }
+      },
+      "edit": {
+        "title": "Which line?",
+        "data": {
+          "line": "Line"
+        }
+      },
+      "edit_line": {
+        "title": "Walk time and name",
+        "description": "**Line {line}** from **{stop}**. The entities keep their IDs.",
+        "data": {
+          "delay": "Walk time to stop",
+          "name": "Name prefix"
+        }
+      },
+      "apis": {
+        "title": "Extra Västtrafik APIs",
+        "description": "Disruptions, stop details and commuter parking come from separate Västtrafik APIs. Each has to be added to your application at [developer.vasttrafik.se](https://developer.vasttrafik.se) before your key can use it. The boxes below are ticked for the ones your key can use right now; the rest of the integration works without them.",
+        "data": {
+          "use_disruptions": "Disruptions (Störning)",
+          "use_geografi": "Stop details and tariff zones (Geografi)",
+          "use_parking": "Commuter parking (Smart Pendelparkering)"
+        },
+        "data_description": {
+          "use_disruptions": "Disruption sensors and disruption alerts.",
+          "use_geografi": "Tariff zones, Närtrafik and parking facilities.",
+          "use_parking": "Free spaces, forecasts and cameras for parkings at the stops you board at."
+        }
       }
     },
     "error": {
@@ -173,10 +213,142 @@
       "station_required": "Please enter a stop name.",
       "station_not_found": "No stop found. Try adding the city name.",
       "line_required": "Please enter a line name.",
-      "unknown": "An unexpected error occurred — check the HA log for details."
+      "unknown": "An unexpected error occurred — check the Home Assistant log for details.",
+      "line_exists": "That line is already monitored from this stop in this direction.",
+      "api_not_enabled": "Your API key has no access to one of the ticked APIs. Add it to your application at developer.vasttrafik.se first, or untick it."
     },
     "abort": {
       "no_lines": "No lines are currently monitored."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "leave_at": {
+        "name": "Leave at"
+      },
+      "parking_free_spaces": {
+        "name": "Free spaces"
+      },
+      "parking_full_at": {
+        "name": "Expected full"
+      }
+    },
+    "camera": {
+      "parking_camera": {
+        "name": "Camera {label}"
+      }
+    },
+    "event": {
+      "trip_alert": {
+        "name": "Alerts",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "platform_changed": "Platform changed",
+              "departure_cancelled": "Departure cancelled",
+              "stop_skipped": "Stop skipped",
+              "disruption_started": "Disruption started",
+              "disruption_ended": "Disruption ended"
+            }
+          }
+        }
+      }
+    }
+  },
+  "services": {
+    "search_journey": {
+      "name": "Search journey",
+      "description": "Finds the next journeys between two stops and returns them.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Västtrafik entry to use when more than one is set up."
+        },
+        "origin": {
+          "name": "From",
+          "description": "Stop name or 16-digit gid."
+        },
+        "destination": {
+          "name": "To",
+          "description": "Stop name or 16-digit gid."
+        },
+        "via": {
+          "name": "Via",
+          "description": "Stop the journey must pass."
+        },
+        "time": {
+          "name": "Time",
+          "description": "Departure time, or arrival time with Arrive by. Defaults to now."
+        },
+        "arrive_by": {
+          "name": "Arrive by",
+          "description": "Treat the time as the latest arrival."
+        },
+        "only_direct": {
+          "name": "Direct only",
+          "description": "Leave out journeys with a change."
+        },
+        "transport_modes": {
+          "name": "Transport modes",
+          "description": "Restrict the search to these modes."
+        },
+        "limit": {
+          "name": "Results",
+          "description": "How many journeys to return."
+        }
+      }
+    },
+    "stop_board": {
+      "name": "Stop board",
+      "description": "Returns the departures from, or arrivals to, a stop.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Västtrafik entry to use when more than one is set up."
+        },
+        "stop": {
+          "name": "Stop",
+          "description": "Stop name or 16-digit gid."
+        },
+        "board": {
+          "name": "Board",
+          "description": "Departures or arrivals."
+        },
+        "minutes": {
+          "name": "Time span",
+          "description": "How far ahead to look."
+        },
+        "line": {
+          "name": "Line",
+          "description": "Only this line."
+        },
+        "limit": {
+          "name": "Results",
+          "description": "How many rows to return."
+        }
+      }
+    },
+    "line_vehicles": {
+      "name": "Line vehicles",
+      "description": "Returns where the vehicles of a line are right now.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Västtrafik entry to use when more than one is set up."
+        },
+        "line": {
+          "name": "Line",
+          "description": "Line number as shown on the vehicle."
+        },
+        "stop": {
+          "name": "Around stop",
+          "description": "Centre of the search. Defaults to Home Assistant's home."
+        },
+        "radius_km": {
+          "name": "Radius",
+          "description": "How far from the centre to look."
+        }
+      }
     }
   }
 }

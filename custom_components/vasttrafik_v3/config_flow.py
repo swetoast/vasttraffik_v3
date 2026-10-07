@@ -24,8 +24,10 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from ._helpers import line_key
 from .api import VtjpAdapter
 from .const import (
+    API_SWITCHES,
     CONF_DELAY,
     CONF_DIRECTION,
     CONF_DIRECTION_GID,
@@ -41,12 +43,21 @@ from .const import (
     CONF_STOP_GID,
     CONF_STOP_NAME,
     CONF_TRANSPORT_MODE,
+    CONF_USE_HOME,
     DEFAULT_DELAY,
     DEFAULT_LANGUAGE,
     DOMAIN,
     SUPPORTED_LANGUAGES,
 )
-from .options import VasttrafikOptionsFlowHandler
+from .options import (
+    VasttrafikOptionsFlowHandler,
+    api_defaults,
+    apis_schema,
+    async_nearby_stops,
+    nearby_match,
+    refused_choice,
+    start_stop_schema,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -152,7 +163,6 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._language: str = DEFAULT_LANGUAGE
         self._adapter:  VtjpAdapter | None = None
         self._monitored: list[dict] = []
-        self._reauth_entry: config_entries.ConfigEntry | None = None
 
         # Per-iteration transient state — cleared by _reset().
         self._start_name: str = ""
@@ -165,6 +175,11 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._live_departures:  list[dict] = []
         self._available_lines:  list[dict] = []
+        self._journey_line_dirs: dict[str, str] = {}
+        self._nearby: list[dict] | None = None
+        self._walk: int | None = None
+        self._use_home = True
+        self._apis: dict[str, bool] = {key: True for key in API_SWITCHES}
 
         self._line_name:    str = ""
         self._line_gid:     str = ""
@@ -180,6 +195,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._stop_picker_for  = ""
         self._live_departures  = []
         self._available_lines  = []
+        self._journey_line_dirs = {}
+        self._walk = None
         self._line_name = self._line_gid = self._line_mode = ""
         self._direction = self._direction_gid = ""
 
@@ -191,6 +208,7 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             key      = (user_input.get(CONF_KEY)      or "").strip()
             secret   = (user_input.get(CONF_SECRET)   or "").strip()
             language = (user_input.get(CONF_LANGUAGE) or DEFAULT_LANGUAGE)
+            self._use_home = bool(user_input.get(CONF_USE_HOME, True))
             if not key or not secret:
                 errors["base"] = "auth"
             else:
@@ -215,7 +233,7 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # One entry per credential; lines are managed via the options flow.
                 await self.async_set_unique_id(self._key)
                 self._abort_if_unique_id_configured()
-                return await self.async_step_start_stop()
+                return await self.async_step_apis()
 
         lang_options = [
             {"value": code, "label": label}
@@ -236,7 +254,34 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Optional(CONF_USE_HOME, default=True): BooleanSelector(),
             }),
+            errors=errors,
+        )
+
+    # ── Step 1b: which other APIs the key has ─────────────────────────────────
+
+    async def async_step_apis(self, user_input: dict | None = None) -> dict:
+        """Disruptions, Geografi and commuter parking are separate APIs that an
+        application may or may not have. The key is asked, and the boxes start
+        out matching the answer."""
+        errors: dict = {}
+        access = await self.hass.async_add_executor_job(
+            self._adapter.probe_optional_apis  # type: ignore[union-attr]
+        )
+        if user_input is not None:
+            choice = {key: bool(user_input.get(key)) for key in API_SWITCHES}
+            if refused_choice(choice, access):
+                errors["base"] = "api_not_enabled"
+            else:
+                self._apis = choice
+                return await self.async_step_start_stop()
+        return self.async_show_form(
+            step_id="apis",
+            data_schema=apis_schema(
+                {key: bool(user_input.get(key)) for key in API_SWITCHES}
+                if user_input is not None else api_defaults(access)
+            ),
             errors=errors,
         )
 
@@ -244,16 +289,13 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_reauth(self, entry_data: dict) -> dict:
         """Triggered by HA when the API rejects the stored credentials."""
-        self._reauth_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
-        if self._reauth_entry:
-            self._language = self._reauth_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        self._language = entry_data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input: dict | None = None) -> dict:
         errors: dict = {}
-        if user_input is not None and self._reauth_entry is not None:
+        entry = self._get_reauth_entry()
+        if user_input is not None:
             key    = (user_input.get(CONF_KEY)    or "").strip()
             secret = (user_input.get(CONF_SECRET) or "").strip()
             if not key or not secret:
@@ -269,14 +311,18 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "cannot_connect"
 
                 if not errors:
-                    self.hass.config_entries.async_update_entry(
-                        self._reauth_entry,
-                        data={**self._reauth_entry.data, CONF_KEY: key, CONF_SECRET: secret},
+                    # The key is the entry's unique ID: follow it when the user
+                    # switches to a new application, unless another entry has it.
+                    other = self.hass.config_entries.async_entry_for_domain_unique_id(
+                        DOMAIN, key
                     )
-                    await self.hass.config_entries.async_reload(
-                        self._reauth_entry.entry_id
+                    if other and other.entry_id != entry.entry_id:
+                        return self.async_abort(reason="already_configured")
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        unique_id=key,
+                        data_updates={CONF_KEY: key, CONF_SECRET: secret},
                     )
-                    return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -299,6 +345,9 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             name = (user_input.get(CONF_STOP_NAME) or "").strip()
             if not name:
                 errors["base"] = "station_required"
+            elif picked := nearby_match(self._nearby or [], name):
+                self._start_name, (self._start_gid, self._walk) = name, picked
+                return await self.async_step_end_stop()
             else:
                 try:
                     def _lookup() -> list[dict]:
@@ -327,13 +376,13 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._stop_picker_for = "start"
                         return await self.async_step_pick_stop()
 
+        if self._nearby is None:
+            self._nearby = (
+                await async_nearby_stops(self.hass, self._adapter) if self._use_home else []
+            )
         return self.async_show_form(
             step_id="start_stop",
-            data_schema=vol.Schema({
-                vol.Required(CONF_STOP_NAME): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.TEXT)
-                ),
-            }),
+            data_schema=start_stop_schema(self._nearby),
             description_placeholders={"example": "Brunnsparken, Göteborg"},
             errors=errors,
         )
@@ -435,7 +484,11 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         stop_gid = self._start_gid
 
         def _fetch_departures() -> list[dict]:
-            return self._adapter.get_departures(stop_gid, limit=60)  # type: ignore[union-attr]
+            # A full day at the default 2 per line+direction lists every line
+            # serving the stop, including ones not running in the next hour.
+            return self._adapter.get_departures(  # type: ignore[union-attr]
+                stop_gid, limit=60, time_span_minutes=1440, max_pages=4
+            )
 
         try:
             self._live_departures = await self.hass.async_add_executor_job(
@@ -456,21 +509,11 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             start_gid = self._start_gid
             end_gid   = self._end_gid
 
-            def _plan_journey() -> dict:
-                return self._adapter.plan_journey(start_gid, end_gid, limit=10)  # type: ignore[union-attr]
-
             try:
-                plan = await self.hass.async_add_executor_job(_plan_journey)
-                journey_lines: set[str] = set()
-                for result in (plan.get("results") or []):
-                    for leg in (result.get("tripLegs") or []):
-                        short = (
-                            (leg.get("serviceJourney") or {})
-                            .get("line", {})
-                            .get("shortName") or ""
-                        )
-                        if short:
-                            journey_lines.add(short)
+                self._journey_line_dirs = await self.hass.async_add_executor_job(
+                    self._adapter.line_directions, start_gid, end_gid  # type: ignore[union-attr]
+                )
+                journey_lines = set(self._journey_line_dirs)
 
                 all_lines = _lines_from_departures(self._live_departures)
                 if journey_lines:
@@ -515,11 +558,17 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._line_mode = (match or {}).get("transport_mode") or "bus"
 
                     if self._end_name:
-                        self._direction, self._direction_gid = (
-                            _best_direction_for_endpoint(
-                                self._live_departures, short, self._end_name
+                        # The journey plan knows which way reaches the end stop;
+                        # scanning headsigns is only the fallback.
+                        planned = self._journey_line_dirs.get(short)
+                        if planned:
+                            self._direction, self._direction_gid = planned, ""
+                        else:
+                            self._direction, self._direction_gid = (
+                                _best_direction_for_endpoint(
+                                    self._live_departures, short, self._end_name
+                                )
                             )
-                        )
                         _LOGGER.debug(
                             "Auto-direction for line %s toward %s: %r",
                             short, self._end_name, self._direction,
@@ -623,6 +672,13 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     entry[CONF_DIRECTION]     = self._direction
                     entry[CONF_DIRECTION_GID] = self._direction_gid
 
+                if any(line_key(m) == line_key(entry) for m in self._monitored):
+                    return self.async_show_form(
+                        step_id="line_options",
+                        data_schema=self._line_options_schema(default_name),
+                        description_placeholders=self._line_options_placeholders(),
+                        errors={"base": "line_exists"},
+                    )
                 self._monitored.append(entry)
                 _LOGGER.debug("Appended monitored entry: %s", entry)
             except Exception as exc:
@@ -650,7 +706,9 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _line_options_schema(self, default_name: str) -> vol.Schema:
         return vol.Schema({
-            vol.Optional(CONF_DELAY, default=DEFAULT_DELAY): NumberSelector(
+            vol.Optional(
+                CONF_DELAY, default=DEFAULT_DELAY if self._walk is None else self._walk
+            ): NumberSelector(
                 NumberSelectorConfig(
                     min=0, max=30, step=1,
                     unit_of_measurement="min",
@@ -690,6 +748,8 @@ class VasttrafikConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_KEY:             self._key,
                 CONF_SECRET:          self._secret,
                 CONF_LANGUAGE:        self._language,
+                CONF_USE_HOME:        self._use_home,
+                **self._apis,
                 CONF_MONITORED_LINES: self._monitored,
             },
         )

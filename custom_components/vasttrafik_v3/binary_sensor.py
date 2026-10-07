@@ -16,19 +16,23 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util.dt import now as ha_now
 
+from ._helpers import dir_key_for_line, parse_dt
 from .api import VtjpAdapter
+from .coordinator import VasttrafikDepartureCoordinator
 from .const import (
     CONF_LINE_GID,
     CONF_LINE_NAME,
     CONF_MONITORED_LINES,
     CONF_STOP_GID,
     CONF_STOP_NAME,
+    CONF_USE_DISRUPTIONS,
     DISRUPTION_SCAN_INTERVAL,
     DOMAIN,
     SEVERITY_ORDER,
 )
-from .sensor import device_info_for_line, dir_key_for_line
+from .sensor import device_info_for_line
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = DISRUPTION_SCAN_INTERVAL
@@ -51,8 +55,10 @@ async def async_setup_entry(
     api: VtjpAdapter = store["api"]
     # Clear any stale repair issue from an earlier build.
     ir.async_delete_issue(hass, DOMAIN, "storning_unavailable")
+    if not store["switches"][CONF_USE_DISRUPTIONS]:
+        return
     entities = [
-        VasttrafikDisruptionSensor(hass, api, ml, entry.entry_id, i)
+        VasttrafikDisruptionSensor(hass, api, ml, entry.entry_id, store["coordinators"][i])
         for i, ml in enumerate(store["config"].get(CONF_MONITORED_LINES, []))
     ]
     if entities:
@@ -60,7 +66,14 @@ async def async_setup_entry(
 
 
 class VasttrafikDisruptionSensor(BinarySensorEntity):
-    """ON when at least one active disruption affects the configured line."""
+    """ON while a disruption affecting the configured line is in effect.
+
+    The API also returns situations that start later; those are listed as
+    upcoming but do not turn the sensor on.
+    """
+
+    # Can exceed the recorder's 16 kB attribute limit on a bad traffic day.
+    _unrecorded_attributes = frozenset({"disruptions", "upcoming_disruptions"})
 
     _attr_has_entity_name  = True
     _attr_name             = "Störning"
@@ -74,11 +87,13 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
         api: VtjpAdapter,
         ml: dict,
         entry_id: str,
-        idx: int,
+        coordinator: VasttrafikDepartureCoordinator,
     ) -> None:
         self.hass  = hass
         self._api  = api
         self._ml   = ml
+        self._coordinator = coordinator
+        self._known: set[str] | None = None  # active situation numbers at last poll
 
         stop_gid  = ml.get(CONF_STOP_GID, "")
         line_name = ml.get(CONF_LINE_NAME, "")
@@ -86,7 +101,11 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
         self._attr_unique_id   = f"{entry_id}_dis_{stop_gid}_{line_name}_{dir_key_for_line(ml)}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
 
-        self._disruptions: list[dict] = []
+        self._situations: list[dict] = []
+
+    @property
+    def _disruptions(self) -> list[dict]:
+        return [s for s in self._situations if _is_active(s)]
 
     # ── BinarySensorEntity ────────────────────────────────────────────────────
 
@@ -103,12 +122,21 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        # scope: "trip" names one of your next buses, "stop" hits a stop you
+        # use, "line" is somewhere else on the line.
+        active = [
+            {**s, "scope": self._coordinator.situation_scope(s)} for s in self._disruptions
+        ]
+        scopes = {s["scope"] for s in active}
         return {
-            "line":             self._ml.get(CONF_LINE_NAME),
-            "stop":             self._ml.get(CONF_STOP_NAME),
-            "disruption_count": len(self._disruptions),
-            "worst_severity":   self._worst_severity(),
-            "disruptions":      self._disruptions,
+            "line":                 self._ml.get(CONF_LINE_NAME),
+            "stop":                 self._ml.get(CONF_STOP_NAME),
+            "disruption_count":     len(active),
+            "worst_severity":       self._worst_severity(),
+            "affects_your_stop":    bool(scopes & {"stop", "trip"}),
+            "affects_next_departure": "trip" in scopes,
+            "disruptions":          active,
+            "upcoming_disruptions": [s for s in self._situations if _is_upcoming(s)],
         }
 
     # ── Update ────────────────────────────────────────────────────────────────
@@ -129,11 +157,8 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
                 _LOGGER.debug(
                     "Störning by line GID %s: %d situation(s)", line_gid, len(raw)
                 )
-            except Exception as exc:
-                _LOGGER.warning(
-                    "Störning line fetch failed for %s: %s",
-                    self._attr_unique_id, exc, exc_info=True,
-                )
+            except Exception as exc:  # noqa: BLE001
+                self._fetch_failed("line", exc)
                 return
 
         elif stop_gid:
@@ -146,11 +171,8 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
                     "Störning by stop GID %s: %d situation(s) before line filter",
                     stop_gid, len(raw),
                 )
-            except Exception as exc:
-                _LOGGER.warning(
-                    "Störning stop fetch failed for %s: %s",
-                    self._attr_unique_id, exc, exc_info=True,
-                )
+            except Exception as exc:  # noqa: BLE001
+                self._fetch_failed("stop", exc)
                 return
 
             # Filter by designation (public line number), falling back to name.
@@ -169,9 +191,55 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
         else:
             return
 
-        self._disruptions = [_normalise(sit) for sit in raw]
+        # "off" must mean "no disruption", not "could not ask".
+        if self._api.disruptions_unavailable:
+            self._went_unavailable()
+            return
+        if not self._attr_available:
+            _LOGGER.info("Störning data is available again for %s", self._attr_unique_id)
+        self._attr_available = True
+        self._situations = [_normalise(sit) for sit in raw]
+        self._publish()
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _publish(self) -> None:
+        """Hand the active situations to the line's coordinator, which shows the
+        relevant one on the departure sensor and reports changes as events."""
+        active = self._disruptions
+        coordinator = self._coordinator
+        coordinator.situations = active
+        numbers = {str(s.get("situation_number")) for s in active}
+        if self._known is not None:
+            for s in active:
+                if str(s.get("situation_number")) not in self._known:
+                    coordinator.push_alert(
+                        "disruption_started",
+                        title=s.get("title"), description=s.get("description"),
+                        severity=s.get("severity"), scope=coordinator.situation_scope(s),
+                        situation_number=s.get("situation_number"),
+                    )
+            for number in self._known - numbers:
+                coordinator.push_alert("disruption_ended", situation_number=number)
+        changed = self._known is not None and numbers != self._known
+        self._known = numbers
+        if changed or active:
+            coordinator.async_update_listeners()
+
+    def _fetch_failed(self, kind: str, exc: Exception) -> None:
+        if self._attr_available:  # log once per outage, not every poll
+            _LOGGER.warning(
+                "Störning %s fetch failed for %s: %s", kind, self._attr_unique_id, exc
+            )
+        self._went_unavailable()
+
+    def _went_unavailable(self) -> None:
+        """Without fresh data the departure sensor must not keep showing an old
+        disruption. `_known` is kept, so recovery does not re-announce it."""
+        self._attr_available = False
+        if self._coordinator.situations:
+            self._coordinator.situations = []
+            self._coordinator.async_update_listeners()
 
     def _worst_severity(self) -> str | None:
         if not self._disruptions:
@@ -182,6 +250,18 @@ class VasttrafikDisruptionSensor(BinarySensorEntity):
             return SEVERITY_ORDER.index(sev) if sev in SEVERITY_ORDER else 0
 
         return max(self._disruptions, key=_idx).get("severity")
+
+
+def _is_active(situation: dict) -> bool:
+    now = ha_now()
+    start = parse_dt(situation.get("start_time"))
+    end = parse_dt(situation.get("end_time"))
+    return (start is None or start <= now) and (end is None or now < end)
+
+
+def _is_upcoming(situation: dict) -> bool:
+    start = parse_dt(situation.get("start_time"))
+    return start is not None and start > ha_now()
 
 
 # ── Normalisation ─────────────────────────────────────────────────────────────

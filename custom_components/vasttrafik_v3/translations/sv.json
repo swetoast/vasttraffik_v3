@@ -6,10 +6,12 @@
         "description": "Hämta dina uppgifter från [developer.vasttrafik.se](https://developer.vasttrafik.se) → My Applications → skapa en app → kopiera key och secret.",
         "data": {
           "key": "API-nyckel",
-          "secret": "API-hemlighet"
+          "secret": "API-hemlighet",
+          "use_home": "Använd min hemposition"
         },
         "data_description": {
-          "secret": "Sparas säkert och visas inte igen"
+          "secret": "Sparas säkert och visas inte igen",
+          "use_home": "Skickar Home Assistants hemkoordinat till Västtrafik för att föreslå hållplatser i närheten och planera resor från och till din dörr. Stäng av för att hålla den privat."
         }
       },
       "reauth_confirm": {
@@ -22,7 +24,7 @@
       },
       "start_stop": {
         "title": "Var går du på?",
-        "description": "Ange namnet på hållplatsen där du går på. Om flera träffar hittas får du välja rätt hållplats i en lista.\n\nExempel: {example}",
+        "description": "Välj en hållplats nära hemmet eller skriv valfritt hållplatsnamn, t.ex. {example}.",
         "data": {
           "stop_name": "Hållplats"
         },
@@ -80,6 +82,20 @@
           "delay": "Visa avgångar minst så här många minuter framåt — sätt detta till din gångtid.",
           "name": "Prefix för relaterade entiteter. Lämna tomt för automatiskt namn."
         }
+      },
+      "apis": {
+        "title": "Fler API:er från Västtrafik",
+        "description": "Störningar, hållplatsdetaljer och pendelparkering kommer från separata API:er hos Västtrafik. Vart och ett måste läggas till i din applikation på [developer.vasttrafik.se](https://developer.vasttrafik.se) innan din nyckel kan använda det. Rutorna nedan är ikryssade för dem som din nyckel kan använda just nu; resten av integrationen fungerar utan dem.",
+        "data": {
+          "use_disruptions": "Störningar (Störning)",
+          "use_geografi": "Hållplatsdetaljer och zoner (Geografi)",
+          "use_parking": "Pendelparkering (Smart Pendelparkering)"
+        },
+        "data_description": {
+          "use_disruptions": "Störningssensorer och störningslarm.",
+          "use_geografi": "Zoner, Närtrafik och parkeringens faciliteter.",
+          "use_parking": "Lediga platser, prognoser och kameror för parkeringar vid hållplatserna du kliver på vid."
+        }
       }
     },
     "error": {
@@ -88,17 +104,13 @@
       "station_required": "Ange en hållplats.",
       "station_not_found": "Ingen hållplats hittades. Prova att lägga till ort, t.ex. 'Brunnsparken, Göteborg'.",
       "line_required": "Ange ett linjenamn.",
-      "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen."
+      "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen.",
+      "line_exists": "Den linjen bevakas redan från den här hållplatsen i den riktningen.",
+      "api_not_enabled": "Din API-nyckel har inte åtkomst till något av de ikryssade API:erna. Lägg till det i din applikation på developer.vasttrafik.se först, eller kryssa ur det."
     },
     "abort": {
       "already_configured": "Detta Västtrafik-konto är redan konfigurerat. Använd alternativknappen för att lägga till fler linjer.",
       "reauth_successful": "Västtrafik återanslöts."
-    }
-  },
-  "issues": {
-    "storning_unavailable": {
-      "title": "Västtrafik störningsdata otillgänglig",
-      "description": "Störnings-API:et returnerade ett åtkomstfel. Detta är en separat prenumeration på developer.vasttrafik.se — ge TrafficSituations-API:et åtkomst till din applikation för att aktivera störningssensorerna. Fram till dess är de avstängda."
     }
   },
   "options": {
@@ -111,7 +123,7 @@
       },
       "start_stop": {
         "title": "Var går du på?",
-        "description": "Exempel: {example}",
+        "description": "Välj en hållplats nära hemmet eller skriv valfritt hållplatsnamn, t.ex. {example}.",
         "data": {
           "stop_name": "Starthållplats"
         }
@@ -165,6 +177,34 @@
         "data": {
           "keep": "Behåll"
         }
+      },
+      "edit": {
+        "title": "Vilken linje?",
+        "data": {
+          "line": "Linje"
+        }
+      },
+      "edit_line": {
+        "title": "Gångtid och namn",
+        "description": "**Linje {line}** från **{stop}**. Entiteterna behåller sina ID:n.",
+        "data": {
+          "delay": "Gångtid till hållplatsen",
+          "name": "Namnprefix"
+        }
+      },
+      "apis": {
+        "title": "Fler API:er från Västtrafik",
+        "description": "Störningar, hållplatsdetaljer och pendelparkering kommer från separata API:er hos Västtrafik. Vart och ett måste läggas till i din applikation på [developer.vasttrafik.se](https://developer.vasttrafik.se) innan din nyckel kan använda det. Rutorna nedan är ikryssade för dem som din nyckel kan använda just nu; resten av integrationen fungerar utan dem.",
+        "data": {
+          "use_disruptions": "Störningar (Störning)",
+          "use_geografi": "Hållplatsdetaljer och zoner (Geografi)",
+          "use_parking": "Pendelparkering (Smart Pendelparkering)"
+        },
+        "data_description": {
+          "use_disruptions": "Störningssensorer och störningslarm.",
+          "use_geografi": "Zoner, Närtrafik och parkeringens faciliteter.",
+          "use_parking": "Lediga platser, prognoser och kameror för parkeringar vid hållplatserna du kliver på vid."
+        }
       }
     },
     "error": {
@@ -173,10 +213,142 @@
       "station_required": "Ange en hållplats.",
       "station_not_found": "Ingen hållplats hittades. Prova att lägga till ort.",
       "line_required": "Ange ett linjenamn.",
-      "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen."
+      "unknown": "Ett oväntat fel inträffade — kontrollera Home Assistant-loggen.",
+      "line_exists": "Den linjen bevakas redan från den här hållplatsen i den riktningen.",
+      "api_not_enabled": "Din API-nyckel har inte åtkomst till något av de ikryssade API:erna. Lägg till det i din applikation på developer.vasttrafik.se först, eller kryssa ur det."
     },
     "abort": {
       "no_lines": "Inga linjer bevakas just nu."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "leave_at": {
+        "name": "Gå senast"
+      },
+      "parking_free_spaces": {
+        "name": "Lediga platser"
+      },
+      "parking_full_at": {
+        "name": "Beräknas full"
+      }
+    },
+    "camera": {
+      "parking_camera": {
+        "name": "Kamera {label}"
+      }
+    },
+    "event": {
+      "trip_alert": {
+        "name": "Händelser",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "platform_changed": "Läge ändrat",
+              "departure_cancelled": "Avgång inställd",
+              "stop_skipped": "Hållplats trafikeras inte",
+              "disruption_started": "Störning börjar",
+              "disruption_ended": "Störning över"
+            }
+          }
+        }
+      }
+    }
+  },
+  "services": {
+    "search_journey": {
+      "name": "Sök resa",
+      "description": "Hittar nästa resor mellan två hållplatser och returnerar dem.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "Västtrafik-post att använda när flera är konfigurerade."
+        },
+        "origin": {
+          "name": "Från",
+          "description": "Hållplatsnamn eller 16-siffrigt gid."
+        },
+        "destination": {
+          "name": "Till",
+          "description": "Hållplatsnamn eller 16-siffrigt gid."
+        },
+        "via": {
+          "name": "Via",
+          "description": "Hållplats som resan måste passera."
+        },
+        "time": {
+          "name": "Tid",
+          "description": "Avgångstid, eller ankomsttid med Ankom senast. Standard är nu."
+        },
+        "arrive_by": {
+          "name": "Ankom senast",
+          "description": "Tolka tiden som senaste ankomst."
+        },
+        "only_direct": {
+          "name": "Endast direkt",
+          "description": "Utelämna resor med byte."
+        },
+        "transport_modes": {
+          "name": "Färdmedel",
+          "description": "Begränsa sökningen till dessa färdmedel."
+        },
+        "limit": {
+          "name": "Antal",
+          "description": "Hur många resor som returneras."
+        }
+      }
+    },
+    "stop_board": {
+      "name": "Hållplatstavla",
+      "description": "Returnerar avgångar från, eller ankomster till, en hållplats.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "Västtrafik-post att använda när flera är konfigurerade."
+        },
+        "stop": {
+          "name": "Hållplats",
+          "description": "Hållplatsnamn eller 16-siffrigt gid."
+        },
+        "board": {
+          "name": "Tavla",
+          "description": "Avgångar eller ankomster."
+        },
+        "minutes": {
+          "name": "Tidsspann",
+          "description": "Hur långt framåt som visas."
+        },
+        "line": {
+          "name": "Linje",
+          "description": "Endast den här linjen."
+        },
+        "limit": {
+          "name": "Antal",
+          "description": "Hur många rader som returneras."
+        }
+      }
+    },
+    "line_vehicles": {
+      "name": "Linjens fordon",
+      "description": "Returnerar var en linjes fordon befinner sig just nu.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "Västtrafik-post att använda när flera är konfigurerade."
+        },
+        "line": {
+          "name": "Linje",
+          "description": "Linjenummer som det står på fordonet."
+        },
+        "stop": {
+          "name": "Kring hållplats",
+          "description": "Sökningens mittpunkt. Standard är Home Assistants hem."
+        },
+        "radius_km": {
+          "name": "Radie",
+          "description": "Hur långt från mittpunkten som söks."
+        }
+      }
     }
   }
 }

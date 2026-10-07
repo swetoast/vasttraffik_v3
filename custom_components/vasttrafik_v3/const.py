@@ -24,6 +24,20 @@ CONF_TRANSPORT_MODE = "transport_mode"
 CONF_DELAY     = "delay"
 CONF_NAME      = "name"
 CONF_LANGUAGE  = "language"
+# Whether Home Assistant's home coordinate may be sent to Västtrafik, for stop
+# suggestions and door-to-door trips.
+CONF_USE_HOME  = "use_home"
+
+# The APIs beyond Planera Resa. An application has to be given each of them
+# separately on the developer portal, so each can be switched off.
+CONF_USE_DISRUPTIONS = "use_disruptions"
+CONF_USE_GEOGRAFI    = "use_geografi"
+CONF_USE_PARKING     = "use_parking"
+API_SWITCHES = {
+    CONF_USE_DISRUPTIONS: "Störning",
+    CONF_USE_GEOGRAFI:    "Geografi",
+    CONF_USE_PARKING:     "Pendelparkering",
+}
 
 SUPPORTED_LANGUAGES = {
     "sv": "Svenska",
@@ -40,3 +54,4 @@ SEVERITY_ORDER = ["UNKNOWN", "SLIGHT", "NORMAL", "SEVERE", "VERY_SEVERE"]
 DEPARTURE_SCAN_INTERVAL  = timedelta(seconds=120)
 DISRUPTION_SCAN_INTERVAL = timedelta(seconds=600)
 VEHICLE_SCAN_INTERVAL    = timedelta(seconds=60)
+PARKING_SCAN_INTERVAL    = timedelta(seconds=300)

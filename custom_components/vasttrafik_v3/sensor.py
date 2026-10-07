@@ -1,11 +1,20 @@
-"""Sensor platform — departure sensor and ticket price sensor per monitored line."""
+"""Sensor platform.
+
+Per monitored line: next departure, time to leave, ticket price.
+Per stop pair:      next trip on any line, and when to leave for it.
+Per commuter parking near a boarding stop: free spaces and when it fills up.
+"""
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
@@ -13,13 +22,15 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util.dt import now
 
+from ._helpers import (
+    best_departure_dt,
+    hhmm,
+    line_key,
+    parse_dt,
+)
 from .api import VtjpAdapter
-from .coordinator import VasttrafikDepartureCoordinator
-from ._helpers import parse_dt, short_direction, to_float  # noqa: F401 (to_float re-exported for device_tracker)
 from .const import (
-    CONF_DELAY,
     CONF_DIRECTION,
-    CONF_DIRECTION_GID,
     CONF_END_STOP_GID,
     CONF_END_STOP_NAME,
     CONF_LINE_NAME,
@@ -28,9 +39,13 @@ from .const import (
     CONF_STOP_GID,
     CONF_STOP_NAME,
     CONF_TRANSPORT_MODE,
-    DEFAULT_DELAY,
     DEPARTURE_SCAN_INTERVAL,
     DOMAIN,
+)
+from .coordinator import (
+    VasttrafikDepartureCoordinator,
+    VasttrafikParkingCoordinator,
+    VasttrafikRouteCoordinator,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,22 +66,8 @@ _MODE_LABEL: dict[str, str] = {
     "taxi":  "Taxi",
 }
 
-def dir_key_for_line(ml: dict) -> str:
-    """Direction discriminator so the same line+stop in two directions doesn't
-    collapse onto one device/unique_id. GID → end-stop GID → direction slug → any.
-    (The text slug matters: direction GID is often absent for direction-only setups.)"""
-    direction_slug = (ml.get(CONF_DIRECTION) or "").strip().lower().replace(" ", "_")
-    return (
-        ml.get(CONF_DIRECTION_GID)
-        or ml.get(CONF_END_STOP_GID)
-        or direction_slug
-        or "any"
-    )
-
-
 def device_info_for_line(entry_id: str, ml: dict) -> DeviceInfo:
     """Shared DeviceInfo grouping a line's three entities under one device."""
-    stop_gid  = ml.get(CONF_STOP_GID, "")
     line_name = ml.get(CONF_LINE_NAME, "")
     mode      = (ml.get(CONF_TRANSPORT_MODE) or "bus").lower()
     stop_name = ml.get(CONF_STOP_NAME, "")
@@ -78,7 +79,7 @@ def device_info_for_line(entry_id: str, ml: dict) -> DeviceInfo:
         )
 
     return DeviceInfo(
-        identifiers={(DOMAIN, f"{entry_id}_{stop_gid}_{line_name}_{dir_key_for_line(ml)}")},
+        identifiers={(DOMAIN, f"{entry_id}_{line_key(ml)}")},
         name=device_name,
         manufacturer="Västtrafik",
         model=_MODE_LABEL.get(mode, "Transit"),
@@ -86,22 +87,25 @@ def device_info_for_line(entry_id: str, ml: dict) -> DeviceInfo:
     )
 
 
-def _best_departure_dt(dep: dict) -> datetime | None:
-    """Best display time: estimatedOtherwisePlannedTime → estimatedTime → plannedTime."""
-    for key in (
-        "estimatedOtherwisePlannedTime",
-        "estimatedTime",
-        "plannedTime",
-    ):
-        dt = parse_dt(dep.get(key))
-        if dt:
-            return dt
-    return None
+
+def device_info_for_route(entry_id: str, route: VasttrafikRouteCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{entry_id}_route_{route.origin_gid}_{route.destination_gid}")},
+        name=f"{route.origin_name} → {route.destination_name}",
+        manufacturer="Västtrafik",
+        model="Trip",
+        entry_type=DeviceEntryType.SERVICE,
+    )
 
 
-def _planned_departure_dt(dep: dict) -> datetime | None:
-    """Return planned departure time only — used to calculate delay."""
-    return parse_dt(dep.get("plannedTime"))
+def device_info_for_parking(entry_id: str, area: dict) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{entry_id}_parking_{area['stop_gid']}_{area['id']}")},
+        name=f"Pendelparkering {area['name']}",
+        manufacturer="Västtrafik",
+        model="Commuter parking",
+        entry_type=DeviceEntryType.SERVICE,
+    )
 
 
 # Human labels for the boolean service flags on DirectionDetailsApiModel.
@@ -142,20 +146,38 @@ async def async_setup_entry(
     store = hass.data[DOMAIN][entry.entry_id]
     api: VtjpAdapter = store["api"]
     coordinators: list[VasttrafikDepartureCoordinator] = store["coordinators"]
+    stops: dict[str, dict] = store["stops"]
     entities: list[SensorEntity] = []
+    polled: list[SensorEntity] = []
 
     for i, ml in enumerate(store["config"].get(CONF_MONITORED_LINES, [])):
         coordinator = coordinators[i]
-        entities.append(VasttrafikDepartureSensor(coordinator, ml, entry.entry_id, i))
+        entities.append(VasttrafikDepartureSensor(coordinator, ml, entry.entry_id, stops))
+        if coordinator.delay:
+            entities.append(VasttrafikLeaveAtSensor(coordinator, ml, entry.entry_id))
         if ml.get(CONF_END_STOP_GID) and ml.get(CONF_STOP_GID):
-            entities.append(VasttrafikTicketSensor(hass, api, ml, entry.entry_id, i))
+            polled.append(VasttrafikTicketSensor(hass, api, ml, entry.entry_id, stops))
 
-    if entities:
-        # No-op for the coordinator-driven departure sensor; polls the ticket sensor.
-        async_add_entities(entities, update_before_add=True)
+    for route in store["routes"].values():
+        entities.append(VasttrafikTripSensor(route, entry.entry_id))
+        if route.delay or route.from_home:
+            entities.append(VasttrafikTripLeaveAtSensor(route, entry.entry_id))
+
+    parking: VasttrafikParkingCoordinator = store["parking"]
+    for area in (parking.data or {}).values():
+        if area["free"] is not None:
+            entities.append(VasttrafikParkingFreeSensor(parking, area, entry.entry_id))
+            entities.append(VasttrafikParkingFullAtSensor(parking, area, entry.entry_id))
+
+    # Coordinator entities already have data; asking them to update first would
+    # trigger a second, redundant refresh of every coordinator at startup.
+    async_add_entities(entities)
+    async_add_entities(polled, update_before_add=True)
 
 
-class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
+# ── Monitored line ─────────────────────────────────────────────────────────────
+
+class VasttrafikDepartureSensor(CoordinatorEntity[VasttrafikDepartureCoordinator], SensorEntity):
     """Next departure (timestamp state) fed by the shared coordinator."""
 
     _attr_has_entity_name  = True
@@ -168,22 +190,18 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
         coordinator: VasttrafikDepartureCoordinator,
         ml: dict,
         entry_id: str,
-        idx: int,
+        stops: dict[str, dict],
     ) -> None:
         super().__init__(coordinator)
-        self._ml    = ml
-
-        stop_gid    = ml.get(CONF_STOP_GID, "")
-        line_name   = ml.get(CONF_LINE_NAME, "")
-        dir_key     = dir_key_for_line(ml)
-
-        self._attr_unique_id  = f"{entry_id}_dep_{stop_gid}_{line_name}_{dir_key}"
+        self._ml = ml
+        self._local_service = (stops.get(ml.get(CONF_STOP_GID, "")) or {}).get("has_local_service")
+        self._attr_unique_id   = f"{entry_id}_dep_{line_key(ml)}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
 
         mode = (ml.get(CONF_TRANSPORT_MODE) or "bus").lower()
         self._attr_icon = _MODE_ICON.get(mode, "mdi:bus-clock")
 
-        self._delay             = timedelta(minutes=ml.get(CONF_DELAY, DEFAULT_DELAY))
+        self._delay = coordinator.delay
         self._departure_dt: datetime | None = None
         self._extra: dict[str, Any] = {}
         self._process()  # coordinator data is already available
@@ -197,13 +215,11 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
         return {
             "line":           self._ml.get(CONF_LINE_NAME),
             "stop":           self._ml.get(CONF_STOP_NAME),
-            "direction":      self._ml.get(CONF_DIRECTION) or "any",
+            "direction":      self.coordinator.ml.get(CONF_DIRECTION) or "any",
             "end_stop":       self._ml.get(CONF_END_STOP_NAME),
             "walk_minutes":   int(self._delay.total_seconds() // 60),
             **self._extra,
         }
-
-    # ── Coordinator-driven update ───────────────────────────────────────────────
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -211,48 +227,30 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
         self.async_write_ha_state()
 
     def _process(self) -> None:
-        """Recompute state + attributes from the shared coordinator's departures."""
+        """Recompute state + attributes from the coordinator's matched departures."""
         data          = self.coordinator.data or {}
-        departures    = data.get("departures") or []
         next_arrival  = data.get("next_arrival")
-        line_name     = self._ml.get(CONF_LINE_NAME, "")
-        direction_str = self._ml.get(CONF_DIRECTION) or None
-        target        = now() + self._delay
+        relevant      = self.coordinator.upcoming()
 
-        dir_lower = direction_str.lower() if direction_str else None
-
-        def _collect(require_direction: bool) -> list[tuple[datetime, dict]]:
-            out: list[tuple[datetime, dict]] = []
-            for dep in departures:
-                if dep.get("isCancelled"):
-                    continue
-                sj   = dep.get("serviceJourney") or {}
-                line = sj.get("line") or {}
-                if (line.get("shortName") or "") != line_name:
-                    continue
-                if require_direction and dir_lower:
-                    d = sj.get("direction") or ""
-                    if d and short_direction(dir_lower) != short_direction(d):
-                        continue
-                t = _best_departure_dt(dep)
-                if t is None or t < target:
-                    continue
-                out.append((t, dep))
-            return out
-
-        # Prefer the configured direction; fall back to any (headsigns vary per trip).
-        candidates = _collect(True) or _collect(False)
-        candidates.sort(key=lambda x: x[0])
-        relevant = [dep for _, dep in candidates]
+        # Shown whether or not a departure is left to catch: these are the reasons.
+        disruption = self.coordinator.relevant_disruption()
+        always = {
+            "cancelled_departures": [
+                hhmm(best_departure_dt(dep)) for dep in data.get("cancelled") or []
+            ],
+            "disruption":       (disruption or {}).get("title"),
+            "disruption_scope": (disruption or {}).get("scope"),
+        }
+        if self._local_service is not None:
+            always["local_service"] = self._local_service
 
         if not relevant:
             self._departure_dt = None
-            self._extra = {}
+            self._extra = always
             return
-
         first   = relevant[0]
-        dep_dt  = _best_departure_dt(first)
-        plan_dt = _planned_departure_dt(first)
+        dep_dt  = best_departure_dt(first)
+        plan_dt = parse_dt(first.get("plannedTime"))
         sj      = first.get("serviceJourney") or {}
         line    = sj.get("line") or {}
         mode    = (line.get("transportMode") or "bus").upper()
@@ -290,7 +288,7 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
         arrival_time = None
         arrival_in_minutes = None
         travel_minutes = None
-        if next_arrival:
+        if next_arrival and next_arrival.get("details_reference") == first.get("detailsReference"):
             arrival_time = next_arrival.get("arrival_hhmm")
             travel_minutes = next_arrival.get("duration_minutes")
             arr_dt = parse_dt(next_arrival.get("arrival_time"))
@@ -299,12 +297,12 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
 
         upcoming: list[dict] = []
         for dep in relevant[:4]:
-            t = _best_departure_dt(dep)
+            t = best_departure_dt(dep)
             if t is None:
                 continue
             up_rt = dep.get("realtimeStopPoint") or dep.get("stopPoint") or {}
             upcoming.append({
-                "departure":         t.strftime("%H:%M"),
+                "departure":         hhmm(t),
                 "minutes_until":     max(0, int((t - now()).total_seconds() // 60)),
                 "platform":          up_rt.get("platform") or dep.get("track"),
                 "is_realtime":       dep.get("estimatedTime") is not None,
@@ -314,11 +312,13 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
 
         self._departure_dt = dep_dt
         self._extra = {
-            "departure_time":         dep_dt.strftime("%H:%M") if dep_dt else None,
+            "departure_time":         hhmm(dep_dt),
             "minutes_until":          max(0, int((dep_dt - now()).total_seconds() // 60)) if dep_dt else None,
             "platform":               platform,
             "stop_moved":             stop_moved,
             "destination":            sj.get("direction"),
+            "direction_matched":      bool(data.get("direction_matched")),
+            "leave_at":               hhmm(dep_dt - self._delay) if dep_dt and self._delay else None,
             "designation":            designation,
             "transport_mode":         line.get("transportMode"),
             "transport_sub_mode":     sub_mode,
@@ -340,8 +340,208 @@ class VasttrafikDepartureSensor(CoordinatorEntity, SensorEntity):
             "travel_minutes":         travel_minutes,
             "upcoming":               upcoming,
             **direction_extras,
+            **always,
         }
 
+
+
+class VasttrafikLeaveAtSensor(CoordinatorEntity[VasttrafikDepartureCoordinator], SensorEntity):
+    """When to walk out the door for the next departure: usable as a time trigger."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "leave_at"
+    _attr_device_class    = SensorDeviceClass.TIMESTAMP
+    _attr_icon            = "mdi:walk"
+    _attr_attribution     = "Data provided by Västtrafik"
+
+    def __init__(
+        self, coordinator: VasttrafikDepartureCoordinator, ml: dict, entry_id: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id   = f"{entry_id}_leave_{line_key(ml)}"
+        self._attr_device_info = device_info_for_line(entry_id, ml)
+
+    @property
+    def native_value(self) -> datetime | None:
+        upcoming = self.coordinator.upcoming()
+        departure = best_departure_dt(upcoming[0]) if upcoming else None
+        return departure - self.coordinator.delay if departure else None
+
+
+# ── Trip between two stops ─────────────────────────────────────────────────────
+
+class VasttrafikTripSensor(CoordinatorEntity[VasttrafikRouteCoordinator], SensorEntity):
+    """Next way to get from the boarding stop to the end stop, whatever the line."""
+
+    _attr_has_entity_name = True
+    _attr_name            = None
+    _attr_device_class    = SensorDeviceClass.TIMESTAMP
+    _attr_icon            = "mdi:routes-clock"
+    _attr_attribution     = "Data provided by Västtrafik"
+
+    def __init__(self, coordinator: VasttrafikRouteCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{entry_id}_trip_{coordinator.origin_gid}_{coordinator.destination_gid}"
+        )
+        self._attr_device_info = device_info_for_route(entry_id, coordinator)
+
+    @property
+    def native_value(self) -> datetime | None:
+        upcoming = self.coordinator.upcoming()
+        return upcoming[0]["departure"] if upcoming else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        route = self.coordinator
+        base = {
+            "origin":       route.origin_name,
+            "destination":  route.destination_name,
+            "walk_minutes": int(route.delay.total_seconds() // 60),
+            **(route.ticket or {}),
+        }
+        upcoming = route.upcoming()
+        if not upcoming:
+            return base
+        first = upcoming[0]
+        access, egress = first["access"] or {}, first["egress"] or {}
+        if not route.delay and access.get("minutes") is not None:
+            base["walk_minutes"] = access["minutes"]
+        current = now()
+
+        def minutes(moment: datetime | None) -> int | None:
+            return max(0, int((moment - current).total_seconds() // 60)) if moment else None
+
+        travel = (
+            int((first["arrival"] - first["departure"]).total_seconds() // 60)
+            if first["arrival"] else None
+        )
+        return {
+            **base,
+            "line":            first["line"],
+            "lines":           first["lines"],
+            "direction":       first["direction"],
+            "transport_mode":  first["transport_mode"],
+            "departure_time":  hhmm(first["departure"]),
+            "minutes_until":   minutes(first["departure"]),
+            "leave_at":        hhmm(route.leave_time(first)),
+            "board_at":        first["board_at"],
+            "alight_at":       first["alight_at"],
+            "access_mode":     access.get("mode"),
+            "access_minutes":  access.get("minutes"),
+            "access_distance_m": access.get("distance_m"),
+            "home_arrival_time": hhmm(egress.get("time")),
+            "transfers":       first["transfers"],
+            "arrival_time":    hhmm(first["arrival"]),
+            "arrival_in_minutes": minutes(first["arrival"]),
+            "travel_minutes":  travel,
+            "changes":         first["changes"],
+            "platform":        first["platform"],
+            "delay_minutes":   first["delay_minutes"],
+            "is_realtime":     first["is_realtime"],
+            "is_part_cancelled": first["is_part_cancelled"],
+            "risk_of_missing_connection": first["risk_of_missing_connection"],
+            "occupancy":       first["occupancy"],
+            "notes":           first["notes"],
+            "legs":            first["legs"],
+            "upcoming": [
+                {
+                    "departure": hhmm(j["departure"]),
+                    "arrival":   hhmm(j["arrival"]),
+                    "lines":     j["lines"],
+                    "changes":   j["changes"],
+                    "minutes_until": minutes(j["departure"]),
+                }
+                for j in upcoming[:5]
+            ],
+        }
+
+
+class VasttrafikTripLeaveAtSensor(CoordinatorEntity[VasttrafikRouteCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+    _attr_translation_key = "leave_at"
+    _attr_device_class    = SensorDeviceClass.TIMESTAMP
+    _attr_icon            = "mdi:walk"
+    _attr_attribution     = "Data provided by Västtrafik"
+
+    def __init__(self, coordinator: VasttrafikRouteCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{entry_id}_tripleave_{coordinator.origin_gid}_{coordinator.destination_gid}"
+        )
+        self._attr_device_info = device_info_for_route(entry_id, coordinator)
+
+    @property
+    def native_value(self) -> datetime | None:
+        upcoming = self.coordinator.upcoming()
+        return self.coordinator.leave_time(upcoming[0]) if upcoming else None
+
+
+# ── Commuter parking ───────────────────────────────────────────────────────────
+
+class _ParkingEntity(CoordinatorEntity[VasttrafikParkingCoordinator]):
+    _attr_has_entity_name = True
+    _attr_attribution     = "Data provided by Västtrafik"
+
+    def __init__(self, coordinator: VasttrafikParkingCoordinator, area: dict, entry_id: str) -> None:
+        super().__init__(coordinator)
+        self._area_id = area["id"]
+        self._attr_device_info = device_info_for_parking(entry_id, area)
+
+    @property
+    def _area(self) -> dict | None:
+        return (self.coordinator.data or {}).get(self._area_id)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._area is not None
+
+
+class VasttrafikParkingFreeSensor(_ParkingEntity, SensorEntity):
+    _attr_translation_key = "parking_free_spaces"
+    _attr_state_class     = SensorStateClass.MEASUREMENT
+    _attr_icon            = "mdi:parking"
+
+    def __init__(self, coordinator: VasttrafikParkingCoordinator, area: dict, entry_id: str) -> None:
+        super().__init__(coordinator, area, entry_id)
+        self._attr_unique_id = f"{entry_id}_parkfree_{area['id']}"
+
+    @property
+    def native_value(self) -> int | None:
+        return (self._area or {}).get("free")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        area = self._area or {}
+        return {
+            "capacity": area.get("capacity"),
+            "free_at_departure": area.get("free_at_departure"),
+            "forecast_for": area.get("forecast_for"),
+            "lots": [
+                {k: lot[k] for k in ("name", "capacity", "free", "barrier", "latitude", "longitude")}
+                for lot in area.get("lots") or []
+            ],
+            **(area.get("details") or {}),
+        }
+
+
+class VasttrafikParkingFullAtSensor(_ParkingEntity, SensorEntity):
+    """Forecast of when the parking fills up today; unknown if it is not expected to."""
+
+    _attr_translation_key = "parking_full_at"
+    _attr_device_class    = SensorDeviceClass.TIMESTAMP
+    _attr_icon            = "mdi:car-clock"
+
+    def __init__(self, coordinator: VasttrafikParkingCoordinator, area: dict, entry_id: str) -> None:
+        super().__init__(coordinator, area, entry_id)
+        self._attr_unique_id = f"{entry_id}_parkfull_{area['id']}"
+
+    @property
+    def native_value(self) -> datetime | None:
+        return (self._area or {}).get("full_at")
+
+
+# ── Ticket price ───────────────────────────────────────────────────────────────
 
 class VasttrafikTicketSensor(SensorEntity):
     """Cheapest adult single ticket price (SEK) for origin→destination.
@@ -364,16 +564,17 @@ class VasttrafikTicketSensor(SensorEntity):
         api: VtjpAdapter,
         ml: dict,
         entry_id: str,
-        idx: int,
+        stops: dict[str, dict],
     ) -> None:
         self.hass = hass
         self._api = api
         self._ml  = ml
+        self._zones = {
+            "origin_zones": (stops.get(ml.get(CONF_STOP_GID, "")) or {}).get("tariff_zones"),
+            "destination_zones": (stops.get(ml.get(CONF_END_STOP_GID, "")) or {}).get("tariff_zones"),
+        }
 
-        stop_gid  = ml.get(CONF_STOP_GID, "")
-        line_name = ml.get(CONF_LINE_NAME, "")
-
-        self._attr_unique_id   = f"{entry_id}_ticket_{stop_gid}_{line_name}_{dir_key_for_line(ml)}"
+        self._attr_unique_id   = f"{entry_id}_ticket_{line_key(ml)}"
         self._attr_device_info = device_info_for_line(entry_id, ml)
 
         self._price: float | None = None
@@ -390,6 +591,7 @@ class VasttrafikTicketSensor(SensorEntity):
         return {
             "origin":      self._ml.get(CONF_STOP_NAME),
             "destination": self._ml.get(CONF_END_STOP_NAME),
+            **{k: v for k, v in self._zones.items() if v},
             **self._extra,
         }
 
